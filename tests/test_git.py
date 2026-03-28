@@ -43,13 +43,13 @@ def test_save_checkpoint(git_repo):
 
 def test_create_branch_and_checkout_main(git_repo):
     git = GitOps(git_repo)
-    branch = git.create_branch(42)
-    assert branch == "ai/issue-42"
+    branch = git.create_branch(42, "Fix the widget")
+    assert branch == "feat/42-fix-the-widget"
     result = subprocess.run(
         ["git", "branch", "--show-current"],
         cwd=git_repo, capture_output=True, text=True, check=True,
     )
-    assert result.stdout.strip() == "ai/issue-42"
+    assert result.stdout.strip() == "feat/42-fix-the-widget"
     git.checkout_main()
     result = subprocess.run(
         ["git", "branch", "--show-current"],
@@ -84,17 +84,19 @@ def test_lockfile(git_repo):
 
 def test_cleanup_orphan_branches(git_repo):
     git = GitOps(git_repo)
-    subprocess.run(
-        ["git", "checkout", "-b", "ai/issue-99"],
-        cwd=git_repo, capture_output=True, check=True,
-    )
+    for branch in ("ai/issue-99", "feat/42-fix-bug"):
+        subprocess.run(
+            ["git", "checkout", "-b", branch],
+            cwd=git_repo, capture_output=True, check=True,
+        )
     subprocess.run(
         ["git", "checkout", "main"],
         cwd=git_repo, capture_output=True, check=True,
     )
     git.cleanup_orphan_branches()
-    result = subprocess.run(
-        ["git", "branch", "--list", "ai/*"],
-        cwd=git_repo, capture_output=True, text=True, check=True,
-    )
-    assert result.stdout.strip() == ""
+    for pattern in ("ai/*", "feat/*"):
+        result = subprocess.run(
+            ["git", "branch", "--list", pattern],
+            cwd=git_repo, capture_output=True, text=True, check=True,
+        )
+        assert result.stdout.strip() == ""

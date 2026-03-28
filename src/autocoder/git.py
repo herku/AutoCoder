@@ -2,10 +2,25 @@ from __future__ import annotations
 
 import atexit
 import os
+import re
 import subprocess
 from pathlib import Path
 
 from autocoder.types import LockError
+
+
+def _slugify(title: str, max_len: int = 40) -> str:
+    """Convert issue title to a branch-name-safe slug."""
+    # Remove emoji and special chars, lowercase
+    slug = re.sub(r"[^\w\s-]", "", title).strip().lower()
+    # Replace whitespace/underscores with hyphens
+    slug = re.sub(r"[\s_]+", "-", slug)
+    # Remove leading/trailing hyphens
+    slug = slug.strip("-")
+    # Truncate at word boundary
+    if len(slug) > max_len:
+        slug = slug[:max_len].rsplit("-", 1)[0]
+    return slug or "fix"
 
 
 class GitOps:
@@ -74,8 +89,9 @@ class GitOps:
         result = self._run("rev-parse", "HEAD")
         return result.stdout.strip()
 
-    def create_branch(self, issue_num: int) -> str:
-        branch = f"ai/issue-{issue_num}"
+    def create_branch(self, issue_num: int, title: str = "") -> str:
+        slug = _slugify(title) if title else str(issue_num)
+        branch = f"feat/{issue_num}-{slug}" if slug != str(issue_num) else f"feat/{issue_num}"
         # Must leave the branch before we can delete it
         current = self._run("branch", "--show-current", check=False).stdout.strip()
         if current == branch:
@@ -114,6 +130,11 @@ class GitOps:
     def push_branch(self, branch: str) -> None:
         self._run("push", "-u", "origin", branch, "--force-with-lease")
 
+    def diff_full(self, base: str | None = None) -> str:
+        target = base or self.get_main_branch()
+        result = self._run("diff", target, check=False)
+        return result.stdout
+
     def diff_stats(self) -> str:
         main = self.get_main_branch()
         result = self._run("diff", "--stat", main, check=False)
@@ -125,7 +146,8 @@ class GitOps:
         return [f for f in result.stdout.strip().split("\n") if f]
 
     def cleanup_orphan_branches(self) -> None:
-        result = self._run("branch", "--list", "--no-color", "ai/*")
-        branches = [b.strip().lstrip("* ") for b in result.stdout.strip().split("\n") if b.strip()]
-        for branch in branches:
-            self._run("branch", "-D", branch, check=False)
+        for prefix in ("feat/*", "ai/*"):
+            result = self._run("branch", "--list", "--no-color", prefix)
+            branches = [b.strip().lstrip("* ") for b in result.stdout.strip().split("\n") if b.strip()]
+            for branch in branches:
+                self._run("branch", "-D", branch, check=False)

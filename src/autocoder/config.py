@@ -14,6 +14,7 @@ def build_config(
     lint_cmd: str | None,
     integration_cmd: str | None,
     model: str,
+    effort: str,
     triage_model: str,
     max_issues: int,
     max_analyze: int,
@@ -27,6 +28,7 @@ def build_config(
     max_retries: int,
     protect_tests: bool,
     test_patterns: str,
+    auto_merge: bool,
 ) -> RunConfig:
     repo_path = str(Path(repo).resolve())
 
@@ -79,6 +81,7 @@ def build_config(
         lint_cmd=lint_cmd,
         integration_cmd=integration_cmd,
         model=model,
+        effort=effort,
         triage_model=triage_model,
         max_issues=max_issues,
         max_analyze=max_analyze,
@@ -92,4 +95,5 @@ def build_config(
         max_retries=max_retries,
         protect_tests=protect_tests,
         test_patterns=[p.strip() for p in test_patterns.split(",") if p.strip()],
+        auto_merge=auto_merge,
     )

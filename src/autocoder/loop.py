@@ -9,8 +9,9 @@ from autocoder.budget import BudgetTracker
 from autocoder.git import GitOps
 from autocoder.issues import analyze_and_prioritize, fetch_issues
 from autocoder.logger import RunLogger
-from autocoder.pr import comment_failure, create_pr, label_failed
-from autocoder.sandbox import build_sandbox
+from autocoder.pr import comment_failure, create_pr, label_failed, mark_ready, merge_pr
+from autocoder.review import build_fix_prompt, review_pr_diff
+from autocoder.sandbox import SandboxConfig, build_sandbox
 from autocoder.types import (
     AgentError,
     AntiCheatViolation,
@@ -91,7 +92,7 @@ def _process_issue(
         protected_files: list[str] = []
 
         checkpoint = git.save_checkpoint()
-        branch = git.create_branch(issue.number)
+        branch = git.create_branch(issue.number, issue.title)
 
         try:
             # Protect test files if enabled
@@ -106,7 +107,7 @@ def _process_issue(
                 repo_path=cfg.repo_path,
             )
             max_budget = budget.remaining_for_issue_usd(cfg.model)
-            agent_result = invoke_agent(prompt, cfg.repo_path, cfg.model, max_budget, sandbox)
+            agent_result = invoke_agent(prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox)
             budget.record(agent_result)
 
             if agent_result.is_error:
@@ -133,16 +134,26 @@ def _process_issue(
             # Stage 5: Commit and PR
             diff_stats = git.diff_stats()
             git.commit_all(f"fix: resolve #{issue.number} — {issue.title}")
-            pr_url = create_pr(cfg.repo_path, issue, branch)
+            main_branch = git.get_main_branch()
+            pr_url = create_pr(cfg.repo_path, issue, branch, base=main_branch)
+
+            # Stage 6: Post-PR review and merge (if enabled)
+            if cfg.auto_merge:
+                print(f"  Draft PR created: {pr_url}")
+                merge_status = _post_pr_review_and_merge(
+                    cfg, git, budget, issue, branch, pr_url, sandbox,
+                )
+                print(f"  {merge_status}\n")
+            else:
+                print(f"  PR created: {pr_url}\n")
 
             log.log_attempt(
                 issue, attempt, agent_result, verify_results,
                 Outcome.SUCCESS, pr_url=pr_url, diff_stats=diff_stats,
             )
-            print(f"  PR created: {pr_url}\n")
             return
 
-        except (AgentError, VerificationError, AntiCheatViolation) as e:
+        except (AgentError, VerificationError, AntiCheatViolation, RuntimeError) as e:
             # Restore test files on failure
             if protected_files:
                 restore_test_files(protected_files)
@@ -185,3 +196,70 @@ def _process_issue(
 
     # Should not reach here, but safety net
     git.checkout_main()
+
+
+def _post_pr_review_and_merge(
+    cfg: RunConfig,
+    git: GitOps,
+    budget: BudgetTracker,
+    issue,
+    branch: str,
+    pr_url: str,
+    sandbox: SandboxConfig,
+) -> str:
+    """Review PR, fix issues, and squash-merge. Returns status string."""
+    try:
+        pre_fix_sha = git.save_checkpoint()
+
+        # Review the diff
+        print("  Running code review...")
+        diff = git.diff_full()
+        review = review_pr_diff(diff, cfg.repo_path, cfg.model)
+
+        if not review.has_actionable_issues:
+            print("  Review: no critical/medium issues found.")
+            return _do_merge(cfg.repo_path, pr_url, "Merged (clean)")
+
+        # Log findings
+        for f in review.findings:
+            print(f"  Review [{f.severity.upper()}] {f.file}: {f.description}")
+
+        # Fix issues
+        print(f"  Fixing {len(review.findings)} review issue(s)...")
+        fix_prompt = build_fix_prompt(review.findings)
+        max_budget = budget.remaining_for_issue_usd(cfg.model)
+        try:
+            fix_result = invoke_agent(fix_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox)
+            budget.record(fix_result)
+        except AgentError as e:
+            print(f"  Fix agent failed: {str(e)[:100]}")
+            return _do_merge(cfg.repo_path, pr_url, "Merged (fix agent failed, using original)")
+
+        if fix_result.is_error:
+            return _do_merge(cfg.repo_path, pr_url, "Merged (fix agent error, using original)")
+
+        # Re-verify after fixes
+        print("  Re-verifying after review fixes...")
+        verify_results = run_verification(cfg)
+        if not all(v.passed for v in verify_results):
+            print("  Review fixes broke tests, reverting to original.")
+            git.rollback(pre_fix_sha)
+            git.push_branch(branch)
+            return _do_merge(cfg.repo_path, pr_url, "Merged (fix broke tests, reverted)")
+
+        # Push review fixes
+        git.commit_all(f"fix: address review feedback for #{issue.number}")
+        git.push_branch(branch)
+        return _do_merge(cfg.repo_path, pr_url, "Merged (with review fixes)")
+
+    except Exception as e:
+        print(f"  Review/merge error: {str(e)[:200]}")
+        return _do_merge(cfg.repo_path, pr_url, "Merged (review failed, using original)")
+
+
+def _do_merge(repo_path: str, pr_url: str, status: str) -> str:
+    """Mark PR ready and squash-merge. Returns status string."""
+    mark_ready(repo_path, pr_url)
+    if merge_pr(repo_path, pr_url):
+        return status
+    return f"PR ready but merge failed (may need approval): {pr_url}"

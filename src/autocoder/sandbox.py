@@ -52,6 +52,7 @@ def build_sandbox(cfg: RunConfig) -> SandboxConfig:
 
 def build_claude_cmd(
     model: str,
+    effort: str,
     max_budget_usd: float,
     sandbox: SandboxConfig,
     repo_path: str,
@@ -60,6 +61,7 @@ def build_claude_cmd(
     cmd = [
         "claude", "-p",
         "--model", model,
+        "--effort", effort,
         "--output-format", "json",
         "--max-budget-usd", str(max_budget_usd),
     ]

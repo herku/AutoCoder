@@ -60,6 +60,7 @@ class RunConfig:
     lint_cmd: Optional[str]
     integration_cmd: Optional[str]
     model: str
+    effort: str
     triage_model: str
     max_issues: int
     max_analyze: int
@@ -73,6 +74,21 @@ class RunConfig:
     max_retries: int
     protect_tests: bool
     test_patterns: list[str]
+    auto_merge: bool
+
+
+@dataclass
+class ReviewFinding:
+    severity: str  # "critical", "medium"
+    file: str
+    description: str
+
+
+@dataclass
+class ReviewResult:
+    findings: list[ReviewFinding]
+    raw_response: str
+    has_actionable_issues: bool
 
 
 class AgentError(Exception):

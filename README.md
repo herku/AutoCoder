@@ -1,21 +1,28 @@
 # AutoCoder
 
-Autonomous AI coding agent loop. Fetches GitHub issues, resolves them with Claude Code CLI, runs tests, and ships draft PRs.
+Autonomous AI coding agent loop. Fetches GitHub issues, resolves them with Claude Code CLI, runs tests, reviews code, and ships PRs.
 
 ## How it works
 
 ```
-Issue fetch → Branch → Claude Code agent → Lint/Test → Draft PR
-                                              ↓ (fail)
-                                         Retry (up to 3x) → Dead-letter
+Fetch all issues → AI auto-prioritize → Process top N
+  │
+  └─ Per issue:
+     Branch (feat/42-fix-widget) → Claude Code agent → Lint/Test → Draft PR
+                                                          ↓ (fail)
+                                                     Retry (up to 3x) → Dead-letter
+     With --auto-merge:
+     Draft PR → Code review (claude -p) → Fix issues → Re-verify → Squash merge
 ```
 
-1. **Issue selection** — Fetches open issues by priority labels (P0→P3) via `gh issue list`
-2. **Branch creation** — Creates `ai/issue-{num}` from main
-3. **Agent execution** — Runs `claude -p` in headless mode with scoped permissions
-4. **Verification** — Progressive pipeline: lint → unit tests → integration tests
-5. **PR creation** — Opens a draft PR linked to the issue
-6. **Retry or skip** — Feeds failure context back to the agent. After 3 failures, labels the issue `auto-fix-failed` and logs to a dead-letter queue
+1. **Issue selection** — Fetches all open issues via `gh issue list`, optionally filtered by `--labels`
+2. **Auto-prioritize** — Sends all issues to Claude for AI-based priority scoring (P0→P3) by automability, complexity, and dependencies
+3. **Branch creation** — Creates `feat/{num}-{slug}` from main
+4. **Agent execution** — Runs `claude -p` with Opus and max effort, scoped permissions
+5. **Verification** — Progressive pipeline: lint → unit tests → integration tests
+6. **PR creation** — Opens a draft PR linked to the issue
+7. **Review & merge** — With `--auto-merge`: reviews the diff, fixes critical/medium issues, re-verifies, squash-merges
+8. **Retry or skip** — Feeds failure context back to the agent. After 3 failures, labels the issue `auto-fix-failed` and logs to a dead-letter queue
 
 ## Install
 
@@ -28,13 +35,20 @@ Requires [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) and [
 ## Usage
 
 ```bash
-uv run autocoder --repo /path/to/repo --labels P0,P1 --test-cmd "npm test" --lint-cmd "npm run lint"
-```
+# Process top 10 issues with auto-prioritization
+uv run autocoder --repo /path/to/repo --test-cmd "npm test" --lint-cmd "npm run lint"
 
-Preview without executing:
+# Process and auto-merge
+uv run autocoder --repo /path/to/repo --test-cmd "npm test" --auto-merge
 
-```bash
-uv run autocoder --repo /path/to/repo --labels P0,P1 --dry-run
+# Filter by labels
+uv run autocoder --repo /path/to/repo --labels "bug,priority:p0"
+
+# Preview without executing
+uv run autocoder --repo /path/to/repo --dry-run
+
+# Single issue test run
+uv run autocoder --repo /path/to/repo --max-issues 1
 ```
 
 ## Options
@@ -42,36 +56,58 @@ uv run autocoder --repo /path/to/repo --labels P0,P1 --dry-run
 | Flag | Default | Description |
 |---|---|---|
 | `--repo` | *(required)* | Path to target git repository |
-| `--labels` | `P0,P1,P2` | Comma-separated priority labels |
+| `--labels` | *(all issues)* | Comma-separated labels to filter by |
 | `--test-cmd` | — | Test command (e.g. `npm test`, `pytest`) |
 | `--lint-cmd` | — | Lint command (e.g. `npm run lint`) |
 | `--integration-cmd` | — | Integration test command |
-| `--model` | `sonnet` | Claude model for coding |
-| `--triage-model` | `haiku` | Model for issue summarization |
+| `--model` | `claude-opus-4-6` | Claude model for coding |
+| `--effort` | `max` | Claude effort level (`min`/`low`/`medium`/`high`/`max`) |
+| `--triage-model` | `haiku` | Model for issue prioritization |
 | `--max-issues` | `10` | Issues to process per run |
+| `--max-analyze` | `0` (all) | Issues to fetch/analyze (0 = unlimited) |
 | `--max-retries` | `3` | Retry attempts per issue |
 | `--token-budget` | `500000` | Token budget per issue |
 | `--daily-cap` | `5000000` | Daily token cap |
+| `--auto-prioritize` | on | AI-based issue prioritization (disable with `--no-auto-prioritize`) |
+| `--auto-merge` | off | Review, fix, and squash-merge PRs after creation |
 | `--docker` | off | Run agent inside Docker sandbox |
 | `--protect-tests` | off | Prevent agent from modifying test files |
 | `--log-dir` | `./logs` | Directory for JSONL logs |
 | `--dry-run` | off | Show plan without executing |
 
+## Auto-prioritize
+
+Enabled by default. All fetched issues are sent to Claude for AI-based priority scoring before processing. Issues are ranked P0→P3 based on:
+
+- **Automability** — Can an AI agent solve this autonomously?
+- **Complexity** — How many lines of code are needed?
+- **Dependencies** — Does it depend on other issues?
+- **Existing labels** — Priority labels are treated as strong hints
+
+Only the top `--max-issues` are processed after prioritization. Use `--dry-run` to preview priorities without executing.
+
+## Auto-merge
+
+With `--auto-merge`, after creating a draft PR:
+
+1. **Review** — Claude reviews the full diff for critical/medium issues (bugs, security, data loss)
+2. **Fix** — If issues found, the agent fixes them automatically
+3. **Re-verify** — Tests run again after fixes
+4. **Merge** — PR is marked ready and squash-merged
+
+If the fix breaks tests, the original PR is merged as-is. If merge fails (e.g. branch protection), the PR stays open for human review.
+
 ## Cost control
 
-- **Model routing** — Haiku for triage/summarization, Sonnet for coding
 - **Per-issue budget** — Enforced via `--max-budget-usd` on Claude CLI
 - **Daily cap** — Stops processing when token limit is reached
+- **Model selection** — Use `--model claude-sonnet-4-6` for cheaper runs
 
 ## Sandboxing
 
 **Default:** Agent permissions scoped via `--allowedTools` — only file operations, git, and your specified test/lint commands.
 
-**Docker mode (`--docker`):** Runs the agent inside a container with `--network=none`. Build the image first:
-
-```bash
-docker build -t autocoder-sandbox .
-```
+**Docker mode (`--docker`):** Runs the agent inside a container. Requires `ANTHROPIC_API_KEY` or OAuth tokens extracted from macOS keychain. The image auto-builds on first use.
 
 ## Anti-cheat
 

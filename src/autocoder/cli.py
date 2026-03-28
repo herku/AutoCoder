@@ -12,7 +12,8 @@ from autocoder.loop import run
 @click.option("--test-cmd", default=None, help="Test command (e.g. 'npm test')")
 @click.option("--lint-cmd", default=None, help="Lint command (e.g. 'npm run lint')")
 @click.option("--integration-cmd", default=None, help="Integration test command")
-@click.option("--model", default="sonnet", help="Claude model for coding tasks")
+@click.option("--model", default="claude-opus-4-6", help="Claude model for coding tasks")
+@click.option("--effort", default="max", type=click.Choice(["min", "low", "medium", "high", "max"]), help="Claude effort level")
 @click.option("--triage-model", default="haiku", help="Claude model for issue triage/summarization")
 @click.option("--max-issues", default=10, type=int, help="Maximum issues to process per run")
 @click.option("--max-analyze", default=0, type=int, help="Maximum issues to fetch/analyze (0 = unlimited)")
@@ -25,6 +26,7 @@ from autocoder.loop import run
 @click.option("--auto-prioritize/--no-auto-prioritize", default=True, help="Use AI to analyze and prioritize issues by automability")
 @click.option("--max-retries", default=3, type=int, help="Max retry attempts per issue")
 @click.option("--protect-tests", is_flag=True, default=False, help="Prevent agent from modifying test files")
+@click.option("--auto-merge", is_flag=True, default=False, help="Auto-review, fix, and squash-merge PRs after creation")
 @click.option(
     "--test-patterns",
     default="**/test_*,**/*_test.*,**/tests/**,**/*.test.*,**/*.spec.*",

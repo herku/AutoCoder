@@ -10,6 +10,7 @@ def _make_config(test_cmd=None, lint_cmd=None, integration_cmd=None):
         lint_cmd=lint_cmd,
         integration_cmd=integration_cmd,
         model="sonnet",
+        effort="max",
         triage_model="haiku",
         max_issues=10,
         max_analyze=0,
@@ -23,6 +24,7 @@ def _make_config(test_cmd=None, lint_cmd=None, integration_cmd=None):
         max_retries=3,
         protect_tests=False,
         test_patterns=[],
+        auto_merge=False,
     )
 
 

@@ -129,12 +129,13 @@ def analyze_and_prioritize(
     prompt = _build_prioritize_prompt(issues)
 
     result = subprocess.run(
-        ["claude", "-p", "--model", triage_model, "--output-format", "text", prompt],
+        ["claude", "-p", "--model", triage_model, "--output-format", "text"],
+        input=prompt,
         cwd=repo_path,
         capture_output=True,
         text=True,
         check=False,
-        timeout=120,
+        timeout=300,
     )
 
     if result.returncode != 0:

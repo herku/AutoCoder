@@ -42,10 +42,11 @@ def invoke_agent(
     prompt: str,
     repo_path: str,
     model: str,
+    effort: str,
     max_budget_usd: float,
     sandbox: SandboxConfig,
 ) -> AgentResult:
-    cmd = build_claude_cmd(model, max_budget_usd, sandbox, repo_path)
+    cmd = build_claude_cmd(model, effort, max_budget_usd, sandbox, repo_path)
 
     start = time.monotonic()
     result = subprocess.run(
