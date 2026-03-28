@@ -62,12 +62,14 @@ class RunConfig:
     model: str
     triage_model: str
     max_issues: int
+    max_analyze: int
     max_turns: int
     token_budget: int
     daily_cap: int
     docker: bool
     log_dir: str
     dry_run: bool
+    auto_prioritize: bool
     max_retries: int
     protect_tests: bool
     test_patterns: list[str]

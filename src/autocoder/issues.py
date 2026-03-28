@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
+import sys
 
 from autocoder.types import Issue, Priority
 
@@ -11,38 +13,53 @@ PRIORITY_ORDER = [Priority.P0, Priority.P1, Priority.P2, Priority.P3]
 ISSUE_BODY_MAX_CHARS = 4000
 
 
-def fetch_issues(repo_path: str, labels: list[str], max_issues: int) -> list[Issue]:
+def fetch_issues(repo_path: str, labels: list[str], limit: int = 0) -> list[Issue]:
+    """Fetch open issues. If limit > 0, cap the result count."""
     all_issues: list[Issue] = []
     seen: set[int] = set()
 
-    for label in labels:
-        if label not in [p.value for p in Priority]:
-            # Non-priority label — fetch directly
-            raw = _gh_fetch(repo_path, label, max_issues)
+    if not labels:
+        raw = _gh_fetch_all(repo_path)
+        for item in raw:
+            if item["number"] not in seen:
+                seen.add(item["number"])
+                all_issues.append(_parse_issue(item, ""))
+    else:
+        for label in labels:
+            raw = _gh_fetch(repo_path, label)
             for item in raw:
                 if item["number"] not in seen:
                     seen.add(item["number"])
                     all_issues.append(_parse_issue(item, label))
-            continue
-
-        raw = _gh_fetch(repo_path, label, max_issues)
-        for item in raw:
-            if item["number"] not in seen:
-                seen.add(item["number"])
-                all_issues.append(_parse_issue(item, label))
 
     all_issues = _priority_sort(all_issues)
-    return all_issues[:max_issues]
+    return all_issues[:limit] if limit > 0 else all_issues
 
 
-def _gh_fetch(repo_path: str, label: str, limit: int) -> list[dict]:
+def _gh_fetch_all(repo_path: str) -> list[dict]:
+    result = subprocess.run(
+        [
+            "gh", "issue", "list",
+            "--state", "open",
+            "--json", "number,title,body,labels,url",
+            "--limit", "500",
+        ],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(result.stdout) if result.stdout.strip() else []
+
+
+def _gh_fetch(repo_path: str, label: str) -> list[dict]:
     result = subprocess.run(
         [
             "gh", "issue", "list",
             "--label", label,
             "--state", "open",
             "--json", "number,title,body,labels,url",
-            "--limit", str(limit),
+            "--limit", "500",
         ],
         cwd=repo_path,
         capture_output=True,
@@ -80,24 +97,145 @@ def _priority_sort(issues: list[Issue]) -> list[Issue]:
     return sorted(issues, key=lambda iss: (order.get(iss.priority, 99), iss.number))
 
 
-def summarize_issue_body(body: str, repo_path: str, model: str) -> str:
-    if len(body) <= ISSUE_BODY_MAX_CHARS:
+def truncate_body(body: str, max_chars: int = ISSUE_BODY_MAX_CHARS) -> str:
+    """Truncate body preserving paragraph boundaries."""
+    if len(body) <= max_chars:
         return body
+    # Cut at last paragraph break before limit
+    truncated = body[:max_chars]
+    last_break = truncated.rfind("\n\n")
+    if last_break > max_chars // 2:
+        truncated = truncated[:last_break]
+    return truncated + "\n\n[...truncated]"
+
+
+# ---------------------------------------------------------------------------
+# Auto-prioritization via claude -p
+# ---------------------------------------------------------------------------
+
+PRIORITIZE_BODY_MAX = 1500
+PROMPT_CHAR_LIMIT = 400_000
+
+
+def analyze_and_prioritize(
+    issues: list[Issue],
+    repo_path: str,
+    triage_model: str = "sonnet",
+) -> tuple[list[Issue], dict[int, str]]:
+    """Send all issues to Claude for AI-based priority scoring."""
+    if not issues:
+        return issues, {}
+
+    prompt = _build_prioritize_prompt(issues)
 
     result = subprocess.run(
-        [
-            "claude", "-p",
-            "--model", model,
-            "--output-format", "text",
-            f"Summarize this GitHub issue body in under 2000 characters. "
-            f"Preserve all technical details, file paths, error messages, and reproduction steps:\n\n{body}",
-        ],
+        ["claude", "-p", "--model", triage_model, "--output-format", "text", prompt],
         cwd=repo_path,
         capture_output=True,
         text=True,
         check=False,
+        timeout=120,
     )
-    if result.returncode == 0 and result.stdout.strip():
-        return result.stdout.strip()
-    # Fallback: hard truncate
-    return body[:ISSUE_BODY_MAX_CHARS] + "\n\n[...truncated]"
+
+    if result.returncode != 0:
+        print(f"  Warning: auto-prioritize failed ({result.returncode}), using default priorities", file=sys.stderr)
+        return _priority_sort(issues), {}
+
+    priorities, reasons = _parse_priority_response(result.stdout, issues)
+
+    if not priorities:
+        return _priority_sort(issues), {}
+
+    for issue in issues:
+        if issue.number in priorities:
+            issue.priority = priorities[issue.number]
+
+    return _priority_sort(issues), reasons
+
+
+def _build_prioritize_prompt(issues: list[Issue]) -> str:
+    body_max = PRIORITIZE_BODY_MAX
+
+    while body_max >= 200:
+        formatted = _format_issues_for_prompt(issues, body_max)
+        prompt = _PRIORITIZE_TEMPLATE.format(formatted_issues=formatted)
+        if len(prompt) <= PROMPT_CHAR_LIMIT:
+            return prompt
+        body_max //= 2
+
+    formatted = _format_issues_for_prompt(issues, 200)
+    return _PRIORITIZE_TEMPLATE.format(formatted_issues=formatted)
+
+
+def _format_issues_for_prompt(issues: list[Issue], body_max: int) -> str:
+    parts = []
+    for iss in issues:
+        body = iss.body[:body_max] if len(iss.body) > body_max else iss.body
+        labels_str = ", ".join(iss.labels) if iss.labels else "(none)"
+        parts.append(
+            f"### Issue #{iss.number}: {iss.title}\n"
+            f"Labels: {labels_str}\n"
+            f"Body:\n{body}"
+        )
+    return "\n\n".join(parts)
+
+
+def _parse_priority_response(
+    raw: str, issues: list[Issue]
+) -> tuple[dict[int, Priority], dict[int, str]]:
+    cleaned = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`")
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        print("  Warning: could not parse auto-prioritize response as JSON", file=sys.stderr)
+        return {}, {}
+
+    if not isinstance(data, list):
+        return {}, {}
+
+    valid_numbers = {iss.number for iss in issues}
+    priorities: dict[int, Priority] = {}
+    reasons: dict[int, str] = {}
+
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        num = entry.get("number")
+        pri = entry.get("priority", "")
+        reason = entry.get("reason", "")
+
+        if num not in valid_numbers:
+            continue
+        try:
+            priorities[num] = Priority(pri)
+        except ValueError:
+            continue
+        if reason:
+            reasons[num] = reason
+
+    return priorities, reasons
+
+
+_PRIORITIZE_TEMPLATE = """\
+You are a triage bot for an autonomous AI coding agent. Analyze these GitHub issues and assign each a priority for automated resolution.
+
+Priority levels:
+- P0: Trivial for AI. Simple bug fix, clear error message, small scope, well-defined acceptance criteria. Do first.
+- P1: Straightforward. Clear requirements, moderate scope, AI can handle with some exploration.
+- P2: Moderate complexity. May require understanding broader architecture, multiple files, or design decisions.
+- P3: Hard/risky for AI. Architectural changes, ambiguous requirements, cross-cutting concerns, or depends on unresolved issues.
+
+Scoring criteria (weight each equally):
+1. AUTOMABILITY: Can an AI coding agent solve this autonomously? Clear reproduction steps and acceptance criteria = higher priority.
+2. COMPLEXITY: Lines of code likely needed. Fewer = higher priority.
+3. DEPENDENCIES: Does it depend on other issues in this batch? If yes, the dependency should be higher priority.
+4. EXISTING LABELS: If the issue already has a priority label, treat it as a strong hint (but you may override if analysis disagrees).
+
+Issues:
+---
+{formatted_issues}
+---
+
+Respond with ONLY a JSON array. No markdown fences. No explanation. Example:
+[{{"number": 1, "priority": "P0", "reason": "Simple typo fix"}}, {{"number": 2, "priority": "P3", "reason": "Requires architectural redesign"}}]"""

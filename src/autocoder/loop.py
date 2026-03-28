@@ -7,7 +7,7 @@ from autocoder.agent import build_prompt, invoke_agent
 from autocoder.anticheat import audit_diff, protect_test_files, restore_test_files
 from autocoder.budget import BudgetTracker
 from autocoder.git import GitOps
-from autocoder.issues import fetch_issues
+from autocoder.issues import analyze_and_prioritize, fetch_issues
 from autocoder.logger import RunLogger
 from autocoder.pr import comment_failure, create_pr, label_failed
 from autocoder.sandbox import build_sandbox
@@ -26,25 +26,40 @@ def run(cfg: RunConfig) -> None:
     budget = BudgetTracker(cfg.token_budget, cfg.daily_cap)
     git = GitOps(cfg.repo_path)
 
-    # Startup
+    # Startup — check clean BEFORE creating lockfile
+    git.assert_clean()
     git.acquire_lock()
     try:
-        git.assert_clean()
         git.cleanup_orphan_branches()
 
-        # Stage 1: Fetch issues
-        print(f"Fetching issues with labels: {', '.join(cfg.labels)}...")
-        issues = fetch_issues(cfg.repo_path, cfg.labels, cfg.max_issues)
+        # Stage 1: Fetch all issues (no limit)
+        if cfg.labels:
+            print(f"Fetching issues with labels: {', '.join(cfg.labels)}...")
+        else:
+            print("Fetching all open issues...")
+        issues = fetch_issues(cfg.repo_path, cfg.labels, limit=cfg.max_analyze)
 
         if not issues:
             print("No issues found. Exiting.")
             return
 
+        print(f"Found {len(issues)} issues.")
+
+        # Stage 1.5: Auto-prioritize (analyzes ALL issues)
+        reasons: dict[int, str] = {}
+        if cfg.auto_prioritize:
+            print(f"Analyzing {len(issues)} issues for AI auto-prioritization...")
+            issues, reasons = analyze_and_prioritize(issues, cfg.repo_path, cfg.triage_model)
+            log.log_prioritization(issues, reasons)
+            print(f"Priority order: {', '.join(f'#{i.number}({i.priority.value})' for i in issues)}\n")
+
         if cfg.dry_run:
-            log.log_dry_run(issues)
+            log.log_dry_run(issues, reasons=reasons if reasons else None)
             return
 
-        print(f"Found {len(issues)} issues to process.\n")
+        # Truncate to max_issues for processing
+        issues = issues[:cfg.max_issues]
+        print(f"Processing top {len(issues)} issues.\n")
 
         for i, issue in enumerate(issues, 1):
             if budget.daily_exhausted():
@@ -89,7 +104,6 @@ def _process_issue(
                 issue,
                 error_context=error_context,
                 repo_path=cfg.repo_path,
-                triage_model=cfg.triage_model,
             )
             max_budget = budget.remaining_for_issue_usd(cfg.model)
             agent_result = invoke_agent(prompt, cfg.repo_path, cfg.model, max_budget, sandbox)
@@ -141,7 +155,7 @@ def _process_issue(
                     issue, attempt, agent_result, verify_results,
                     Outcome.RETRY, error=str(e),
                 )
-                print(f"  Attempt {attempt} failed: {str(e)[:100]}")
+                print(f"  Attempt {attempt} failed: {str(e)[:200]}")
                 if not error_context:
                     error_context = str(e)
             else:

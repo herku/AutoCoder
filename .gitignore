@@ -8,3 +8,4 @@ build/
 *.jsonl
 logs/
 .autocoder.lock
+.claude-home/

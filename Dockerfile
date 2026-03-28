@@ -1,25 +1,17 @@
-FROM ubuntu:24.04
-
-RUN apt-get update && apt-get install -y \
-    curl \
-    git \
-    nodejs \
-    npm \
-    python3 \
-    python3-pip \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install GitHub CLI
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-    | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-    | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
-    && apt-get update && apt-get install -y gh \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Claude Code CLI
+FROM node:20-alpine AS builder
+RUN npm install -g npm@latest
+RUN apk add --no-cache python3 make g++ git
 RUN npm install -g @anthropic-ai/claude-code
 
-WORKDIR /workspace
+FROM node:20-alpine
+RUN apk update && apk upgrade --no-cache
+RUN npm install -g npm@latest
+RUN apk add --no-cache git python3 py3-pip bash github-cli
 
-ENTRYPOINT []
+COPY --from=builder /usr/local/lib/node_modules/@anthropic-ai /usr/local/lib/node_modules/@anthropic-ai
+RUN ln -sf /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js /usr/local/bin/claude && chmod +x /usr/local/bin/claude
+
+WORKDIR /workspace
+USER node
+
+CMD ["bash"]

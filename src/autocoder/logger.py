@@ -62,11 +62,31 @@ class RunLogger:
         }
         self._append(self._log_path, record)
 
-    def log_dry_run(self, issues: list[Issue]) -> None:
+    def log_dry_run(self, issues: list[Issue], reasons: Optional[dict[int, str]] = None) -> None:
         print(f"\n[DRY RUN] Would process {len(issues)} issues:")
         for i, issue in enumerate(issues, 1):
-            print(f"  {i}. #{issue.number} [{issue.priority.value}] {issue.title}")
+            line = f"  {i}. #{issue.number} [{issue.priority.value}] {issue.title}"
+            if reasons and issue.number in reasons:
+                line += f"\n     → {reasons[issue.number]}"
+            print(line)
         print()
+
+    def log_prioritization(self, issues: list[Issue], reasons: dict[int, str]) -> None:
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": self._run_id,
+            "event": "auto_prioritize",
+            "results": [
+                {
+                    "issue_num": iss.number,
+                    "title": iss.title,
+                    "priority": iss.priority.value,
+                    "reason": reasons.get(iss.number, ""),
+                }
+                for iss in issues
+            ],
+        }
+        self._append(self._log_path, record)
 
     def dead_letter(self, issue: Issue, error: str) -> None:
         self._append(

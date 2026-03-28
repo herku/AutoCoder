@@ -4,15 +4,15 @@ import json
 import subprocess
 import time
 
-from autocoder.issues import summarize_issue_body, ISSUE_BODY_MAX_CHARS
+from autocoder.issues import truncate_body
 from autocoder.sandbox import SandboxConfig, build_claude_cmd
 from autocoder.types import AgentResult, AgentError, Issue
 
+PROMPT_BODY_MAX = 4000
 
-def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", triage_model: str = "haiku") -> str:
-    body = issue.body
-    if len(body) > ISSUE_BODY_MAX_CHARS and repo_path:
-        body = summarize_issue_body(body, repo_path, triage_model)
+
+def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", triage_model: str = "") -> str:
+    body = truncate_body(issue.body, PROMPT_BODY_MAX)
 
     parts = [
         f"Fix GitHub issue #{issue.number}: {issue.title}\n",
@@ -45,11 +45,12 @@ def invoke_agent(
     max_budget_usd: float,
     sandbox: SandboxConfig,
 ) -> AgentResult:
-    cmd = build_claude_cmd(prompt, model, max_budget_usd, sandbox, repo_path)
+    cmd = build_claude_cmd(model, max_budget_usd, sandbox, repo_path)
 
     start = time.monotonic()
     result = subprocess.run(
         cmd,
+        input=prompt,
         cwd=repo_path,
         capture_output=True,
         text=True,
@@ -58,11 +59,18 @@ def invoke_agent(
     )
     duration_ms = int((time.monotonic() - start) * 1000)
 
+    # Try to parse JSON even on non-zero exit — Claude returns exit 1
+    # with valid JSON for soft errors (permission denied, tool blocked, etc.)
     if result.returncode != 0:
-        raise AgentError(
-            f"Claude CLI exited with code {result.returncode}: "
-            f"{result.stderr[:500] or result.stdout[:500]}"
-        )
+        try:
+            data = json.loads(result.stdout)
+            # Valid JSON response — parse it normally, is_error will be handled downstream
+            return _parse_agent_output(result.stdout, duration_ms, model)
+        except (json.JSONDecodeError, ValueError):
+            raise AgentError(
+                f"Claude CLI exited with code {result.returncode}: "
+                f"{result.stderr[:500] or result.stdout[:500]}"
+            )
 
     return _parse_agent_output(result.stdout, duration_ms, model)
 

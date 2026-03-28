@@ -41,38 +41,68 @@ class GitOps:
 
     def assert_clean(self) -> None:
         result = self._run("status", "--porcelain")
-        if result.stdout.strip():
+        # Filter out .autocoder.lock (ours) from dirty check
+        dirty = [
+            line for line in result.stdout.strip().split("\n")
+            if line.strip() and ".autocoder.lock" not in line
+        ]
+        if dirty:
             raise SystemExit(
-                f"Error: Working directory is not clean:\n{result.stdout}\n"
+                f"Error: Working directory is not clean:\n" + "\n".join(dirty) + "\n"
                 "Commit or stash changes before running AutoCoder."
             )
+
+    def has_commits(self) -> bool:
+        result = self._run("rev-parse", "HEAD", check=False)
+        return result.returncode == 0
 
     def get_main_branch(self) -> str:
         for name in ("main", "master"):
             result = self._run("rev-parse", "--verify", name, check=False)
             if result.returncode == 0:
                 return name
+        # No main/master yet — check current branch name
+        result = self._run("branch", "--show-current", check=False)
+        current = result.stdout.strip()
+        if current:
+            return current
         raise SystemExit("Error: Could not find main or master branch")
 
     def save_checkpoint(self) -> str:
+        if not self.has_commits():
+            return ""  # Empty repo, no checkpoint possible
         result = self._run("rev-parse", "HEAD")
         return result.stdout.strip()
 
     def create_branch(self, issue_num: int) -> str:
         branch = f"ai/issue-{issue_num}"
-        main = self.get_main_branch()
-        # Delete existing branch if present
+        # Must leave the branch before we can delete it
+        current = self._run("branch", "--show-current", check=False).stdout.strip()
+        if current == branch:
+            # On the target branch — need to switch away first
+            main = self.get_main_branch()
+            if main == branch:
+                # Only branch is the target — create main, switch to it
+                self._run("checkout", "-b", "main", check=False)
+            else:
+                self._run("checkout", main, check=False)
+        elif self.has_commits():
+            main = self.get_main_branch()
+            self._run("checkout", main, check=False)
         self._run("branch", "-D", branch, check=False)
-        self._run("checkout", main)
         self._run("checkout", "-b", branch)
         return branch
 
     def rollback(self, sha: str) -> None:
+        if not sha:
+            # Empty repo checkpoint — remove all tracked files
+            self._run("rm", "-rf", ".", check=False)
+            return
         self._run("reset", "--hard", sha)
 
     def checkout_main(self) -> None:
         main = self.get_main_branch()
-        self._run("checkout", main)
+        self._run("checkout", main, check=False)
 
     def delete_branch(self, branch: str) -> None:
         self._run("branch", "-D", branch, check=False)
