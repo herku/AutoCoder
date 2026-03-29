@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import subprocess
+from typing import Optional
 
-from autocoder.types import Issue
+from autocoder.types import Issue, PlanCheckItem, VerifyResult
 
 
-def create_pr(repo_path: str, issue: Issue, branch: str, base: str = "main") -> str:
+def create_pr(
+    repo_path: str,
+    issue: Issue,
+    branch: str,
+    base: str = "main",
+    *,
+    summary: str = "",
+    diff_stats: str = "",
+    test_plan_items: Optional[list[PlanCheckItem]] = None,
+    verify_results: Optional[list[VerifyResult]] = None,
+) -> str:
     # Push branch
     push = subprocess.run(
         ["git", "push", "-u", "origin", branch, "--force-with-lease"],
@@ -22,12 +33,7 @@ def create_pr(repo_path: str, issue: Issue, branch: str, base: str = "main") -> 
     if len(title) > 70:
         title = title[:67] + "..."
 
-    body = (
-        f"Fixes #{issue.number}\n\n"
-        f"Automated fix by AutoCoder.\n\n"
-        f"**Issue:** {issue.title}\n"
-        f"**Priority:** {issue.priority.value}"
-    )
+    body = _build_pr_body(issue, summary, diff_stats, test_plan_items, verify_results)
 
     result = subprocess.run(
         [
@@ -45,6 +51,48 @@ def create_pr(repo_path: str, issue: Issue, branch: str, base: str = "main") -> 
     if result.returncode != 0:
         raise RuntimeError(f"gh pr create failed: {result.stderr.strip()}")
     return result.stdout.strip()
+
+
+def _build_pr_body(
+    issue: Issue,
+    summary: str,
+    diff_stats: str,
+    test_plan_items: Optional[list[PlanCheckItem]],
+    verify_results: Optional[list[VerifyResult]],
+) -> str:
+    parts = [f"Fixes #{issue.number}\n"]
+
+    if summary:
+        # Truncate at sentence boundary
+        text = summary[:500]
+        if len(summary) > 500:
+            last_period = text.rfind(".")
+            if last_period > 200:
+                text = text[:last_period + 1]
+        parts.append(f"## Summary\n{text}\n")
+
+    if diff_stats:
+        parts.append(f"## Changes\n```\n{diff_stats}\n```\n")
+
+    if test_plan_items:
+        rows = []
+        for item in test_plan_items:
+            icon = "Pass" if item.status == "pass" else "Fail"
+            criterion = item.criterion[:80] if len(item.criterion) > 80 else item.criterion
+            evidence = item.evidence[:100] if len(item.evidence) > 100 else item.evidence
+            rows.append(f"| {criterion} | {icon} | {evidence} |")
+        table = "| Criterion | Status | Evidence |\n|-----------|--------|----------|\n" + "\n".join(rows)
+        parts.append(f"## Test Plan\n{table}\n")
+
+    if verify_results:
+        lines = []
+        for v in verify_results:
+            icon = "passed" if v.passed else "FAILED"
+            lines.append(f"- {v.stage}: {icon} ({v.duration_ms / 1000:.1f}s)")
+        parts.append(f"## Verification\n" + "\n".join(lines) + "\n")
+
+    parts.append("Automated fix by AutoCoder.")
+    return "\n".join(parts)
 
 
 def label_failed(repo_path: str, issue_num: int) -> None:

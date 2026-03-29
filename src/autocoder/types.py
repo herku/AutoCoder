@@ -91,6 +91,20 @@ class ReviewResult:
     has_actionable_issues: bool
 
 
+@dataclass
+class PlanCheckItem:
+    criterion: str
+    status: str  # "pass" or "fail"
+    evidence: str
+
+
+@dataclass
+class TestPlanResult:
+    items: list[PlanCheckItem]
+    raw_response: str
+    all_passed: bool
+
+
 class AgentError(Exception):
     pass
 

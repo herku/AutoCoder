@@ -12,11 +12,17 @@ from autocoder.logger import RunLogger
 from autocoder.pr import comment_failure, create_pr, label_failed, mark_ready, merge_pr
 from autocoder.review import build_fix_prompt, review_pr_diff
 from autocoder.sandbox import SandboxConfig, build_sandbox
+from autocoder.testplan import (
+    build_test_plan_fix_prompt,
+    extract_acceptance_criteria,
+    verify_test_plan,
+)
 from autocoder.types import (
     AgentError,
     AntiCheatViolation,
     Outcome,
     RunConfig,
+    TestPlanResult,
     VerificationError,
 )
 from autocoder.verify import format_failure, run_verification
@@ -131,11 +137,49 @@ def _process_issue(
                 error_context = format_failure(failed)
                 raise VerificationError(failed.stage, error_context)
 
+            # Stage 4.5: Test plan verification
+            test_plan = TestPlanResult(items=[], raw_response="", all_passed=True)
+            criteria = extract_acceptance_criteria(issue.body)
+            if criteria:
+                print(f"  Verifying test plan ({len(criteria)} criteria)...")
+                test_plan = verify_test_plan(issue, git.diff_full(), cfg.repo_path, cfg.model)
+
+                if not test_plan.all_passed:
+                    failed_items = [i for i in test_plan.items if i.status == "fail"]
+                    print(f"  Test plan: {len(failed_items)} criteria not met. Fixing...")
+                    for item in failed_items:
+                        print(f"    - {item.criterion[:80]}")
+
+                    fix_prompt = build_test_plan_fix_prompt(issue, failed_items)
+                    max_budget = budget.remaining_for_issue_usd(cfg.model)
+                    fix_result = invoke_agent(
+                        fix_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox
+                    )
+                    budget.record(fix_result)
+
+                    if not fix_result.is_error:
+                        print(f"  Re-verifying after test plan fix...")
+                        verify_results = run_verification(cfg)
+                        if not all(v.passed for v in verify_results):
+                            failed = next(v for v in verify_results if not v.passed)
+                            error_context = format_failure(failed)
+                            raise VerificationError(failed.stage, error_context)
+                        test_plan = verify_test_plan(issue, git.diff_full(), cfg.repo_path, cfg.model)
+                else:
+                    print(f"  Test plan: all criteria met.")
+
             # Stage 5: Commit and PR
             diff_stats = git.diff_stats()
             git.commit_all(f"fix: resolve #{issue.number} — {issue.title}")
             main_branch = git.get_main_branch()
-            pr_url = create_pr(cfg.repo_path, issue, branch, base=main_branch)
+            summary = agent_result.result_text[:500] if agent_result else ""
+            pr_url = create_pr(
+                cfg.repo_path, issue, branch, base=main_branch,
+                summary=summary,
+                diff_stats=diff_stats,
+                test_plan_items=test_plan.items or None,
+                verify_results=verify_results,
+            )
 
             # Stage 6: Post-PR review and merge (if enabled)
             if cfg.auto_merge:
