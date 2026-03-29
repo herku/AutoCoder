@@ -62,16 +62,29 @@ class RunLogger:
         }
         self._append(self._log_path, record)
 
-    def log_dry_run(self, issues: list[Issue], reasons: Optional[dict[int, str]] = None) -> None:
+    def log_dry_run(
+        self,
+        issues: list[Issue],
+        reasons: Optional[dict[int, str]] = None,
+        dependencies: Optional[dict[int, list[int]]] = None,
+    ) -> None:
         print(f"\n[DRY RUN] Would process {len(issues)} issues:")
         for i, issue in enumerate(issues, 1):
             line = f"  {i}. #{issue.number} [{issue.priority.value}] {issue.title}"
             if reasons and issue.number in reasons:
                 line += f"\n     → {reasons[issue.number]}"
+            if dependencies and issue.number in dependencies and dependencies[issue.number]:
+                blockers = ", ".join(f"#{b}" for b in dependencies[issue.number])
+                line += f"\n     Blocked by: {blockers}"
             print(line)
         print()
 
-    def log_prioritization(self, issues: list[Issue], reasons: dict[int, str]) -> None:
+    def log_prioritization(
+        self,
+        issues: list[Issue],
+        reasons: dict[int, str],
+        dependencies: dict[int, list[int]] | None = None,
+    ) -> None:
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "run_id": self._run_id,
@@ -82,6 +95,7 @@ class RunLogger:
                     "title": iss.title,
                     "priority": iss.priority.value,
                     "reason": reasons.get(iss.number, ""),
+                    "blocked_by": (dependencies or {}).get(iss.number, []),
                 }
                 for iss in issues
             ],

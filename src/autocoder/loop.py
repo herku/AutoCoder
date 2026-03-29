@@ -54,14 +54,22 @@ def run(cfg: RunConfig) -> None:
 
         # Stage 1.5: Auto-prioritize (analyzes ALL issues)
         reasons: dict[int, str] = {}
+        dependencies: dict[int, list[int]] = {}
         if cfg.auto_prioritize:
             print(f"Analyzing {len(issues)} issues for AI auto-prioritization...")
-            issues, reasons = analyze_and_prioritize(issues, cfg.repo_path, cfg.triage_model)
-            log.log_prioritization(issues, reasons)
-            print(f"Priority order: {', '.join(f'#{i.number}({i.priority.value})' for i in issues)}\n")
+            issues, reasons, dependencies = analyze_and_prioritize(issues, cfg.repo_path, cfg.triage_model)
+            log.log_prioritization(issues, reasons, dependencies)
+            parts = []
+            for i in issues:
+                label = f"#{i.number}({i.priority.value})"
+                blockers = dependencies.get(i.number, [])
+                if blockers:
+                    label += f" after {','.join(f'#{b}' for b in blockers)}"
+                parts.append(label)
+            print(f"Priority order: {', '.join(parts)}\n")
 
         if cfg.dry_run:
-            log.log_dry_run(issues, reasons=reasons if reasons else None)
+            log.log_dry_run(issues, reasons=reasons if reasons else None, dependencies=dependencies if dependencies else None)
             return
 
         # Truncate to max_issues for processing

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import json
 import re
 import subprocess
@@ -97,6 +98,62 @@ def _priority_sort(issues: list[Issue]) -> list[Issue]:
     return sorted(issues, key=lambda iss: (order.get(iss.priority, 99), iss.number))
 
 
+def _dependency_reorder(
+    issues: list[Issue],
+    dependencies: dict[int, list[int]],
+) -> list[Issue]:
+    """Topological sort respecting dependencies while preserving priority order."""
+    if not dependencies:
+        return issues
+
+    issue_map = {iss.number: iss for iss in issues}
+    present = set(issue_map)
+    order = {p: i for i, p in enumerate(PRIORITY_ORDER)}
+
+    # Build in-degree map (only for edges where both ends are present)
+    in_degree: dict[int, int] = {n: 0 for n in present}
+    # reverse_adj: blocker -> list of issues it unblocks
+    reverse_adj: dict[int, list[int]] = {n: [] for n in present}
+
+    for num, blockers in dependencies.items():
+        if num not in present:
+            continue
+        for b in blockers:
+            if b in present:
+                in_degree[num] += 1
+                reverse_adj[b].append(num)
+
+    # Kahn's algorithm with priority heap
+    heap: list[tuple[int, int, int]] = []
+    for num in present:
+        if in_degree[num] == 0:
+            iss = issue_map[num]
+            heapq.heappush(heap, (order.get(iss.priority, 99), iss.number, num))
+
+    result: list[Issue] = []
+    while heap:
+        _, _, num = heapq.heappop(heap)
+        result.append(issue_map[num])
+        for dependent in reverse_adj[num]:
+            in_degree[dependent] -= 1
+            if in_degree[dependent] == 0:
+                iss = issue_map[dependent]
+                heapq.heappush(heap, (order.get(iss.priority, 99), iss.number, dependent))
+
+    # Handle cycles: remaining nodes with in_degree > 0
+    if len(result) < len(issues):
+        remaining = [n for n in present if n not in {iss.number for iss in result}]
+        remaining_issues = sorted(
+            [issue_map[n] for n in remaining],
+            key=lambda iss: (order.get(iss.priority, 99), iss.number),
+        )
+        nums = ", ".join(f"#{n}" for n in remaining)
+        print(f"  Warning: dependency cycle detected involving issues {nums}. Breaking cycle.", file=sys.stderr)
+        result.extend(remaining_issues)
+
+    return result
+
+
 def truncate_body(body: str, max_chars: int = ISSUE_BODY_MAX_CHARS) -> str:
     """Truncate body preserving paragraph boundaries."""
     if len(body) <= max_chars:
@@ -121,10 +178,10 @@ def analyze_and_prioritize(
     issues: list[Issue],
     repo_path: str,
     triage_model: str = "sonnet",
-) -> tuple[list[Issue], dict[int, str]]:
+) -> tuple[list[Issue], dict[int, str], dict[int, list[int]]]:
     """Send all issues to Claude for AI-based priority scoring."""
     if not issues:
-        return issues, {}
+        return issues, {}, {}
 
     prompt = _build_prioritize_prompt(issues)
 
@@ -140,18 +197,20 @@ def analyze_and_prioritize(
 
     if result.returncode != 0:
         print(f"  Warning: auto-prioritize failed ({result.returncode}), using default priorities", file=sys.stderr)
-        return _priority_sort(issues), {}
+        return _priority_sort(issues), {}, {}
 
-    priorities, reasons = _parse_priority_response(result.stdout, issues)
+    priorities, reasons, dependencies = _parse_priority_response(result.stdout, issues)
 
     if not priorities:
-        return _priority_sort(issues), {}
+        return _priority_sort(issues), {}, {}
 
     for issue in issues:
         if issue.number in priorities:
             issue.priority = priorities[issue.number]
 
-    return _priority_sort(issues), reasons
+    sorted_issues = _priority_sort(issues)
+    sorted_issues = _dependency_reorder(sorted_issues, dependencies)
+    return sorted_issues, reasons, dependencies
 
 
 def _build_prioritize_prompt(issues: list[Issue]) -> str:
@@ -183,21 +242,22 @@ def _format_issues_for_prompt(issues: list[Issue], body_max: int) -> str:
 
 def _parse_priority_response(
     raw: str, issues: list[Issue]
-) -> tuple[dict[int, Priority], dict[int, str]]:
+) -> tuple[dict[int, Priority], dict[int, str], dict[int, list[int]]]:
     cleaned = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`")
 
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
         print("  Warning: could not parse auto-prioritize response as JSON", file=sys.stderr)
-        return {}, {}
+        return {}, {}, {}
 
     if not isinstance(data, list):
-        return {}, {}
+        return {}, {}, {}
 
     valid_numbers = {iss.number for iss in issues}
     priorities: dict[int, Priority] = {}
     reasons: dict[int, str] = {}
+    dependencies: dict[int, list[int]] = {}
 
     for entry in data:
         if not isinstance(entry, dict):
@@ -205,6 +265,7 @@ def _parse_priority_response(
         num = entry.get("number")
         pri = entry.get("priority", "")
         reason = entry.get("reason", "")
+        blocked_by = entry.get("blocked_by", [])
 
         if num not in valid_numbers:
             continue
@@ -214,8 +275,12 @@ def _parse_priority_response(
             continue
         if reason:
             reasons[num] = reason
+        if isinstance(blocked_by, list):
+            valid_blockers = [b for b in blocked_by if isinstance(b, int) and b in valid_numbers]
+            if valid_blockers:
+                dependencies[num] = valid_blockers
 
-    return priorities, reasons
+    return priorities, reasons, dependencies
 
 
 _PRIORITIZE_TEMPLATE = """\
@@ -238,5 +303,8 @@ Issues:
 {formatted_issues}
 ---
 
-Respond with ONLY a JSON array. No markdown fences. No explanation. Example:
-[{{"number": 1, "priority": "P0", "reason": "Simple typo fix"}}, {{"number": 2, "priority": "P3", "reason": "Requires architectural redesign"}}]"""
+Respond with ONLY a JSON array. No markdown fences. No explanation.
+Include "blocked_by": a list of issue numbers from this batch that MUST be completed before this issue can start. Empty list if none.
+
+Example:
+[{{"number": 1, "priority": "P0", "reason": "Simple typo fix", "blocked_by": []}}, {{"number": 2, "priority": "P3", "reason": "Requires architectural redesign", "blocked_by": [1]}}]"""
