@@ -29,6 +29,7 @@ def build_config(
     protect_tests: bool,
     test_patterns: str,
     auto_merge: bool,
+    plan_mode: bool,
 ) -> RunConfig:
     repo_path = str(Path(repo).resolve())
 
@@ -96,4 +97,5 @@ def build_config(
         protect_tests=protect_tests,
         test_patterns=[p.strip() for p in test_patterns.split(",") if p.strip()],
         auto_merge=auto_merge,
+        plan_mode=plan_mode,
     )

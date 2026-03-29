@@ -11,7 +11,7 @@ from autocoder.types import AgentResult, AgentError, Issue
 PROMPT_BODY_MAX = 4000
 
 
-def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", triage_model: str = "") -> str:
+def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", triage_model: str = "", plan_mode: bool = False) -> str:
     body = truncate_body(issue.body, PROMPT_BODY_MAX)
 
     parts = [
@@ -25,6 +25,16 @@ def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", tri
         "- Run the test suite to verify your changes work",
         "- Keep changes minimal and focused on the issue",
     ]
+
+    if plan_mode:
+        parts.extend([
+            "",
+            "IMPORTANT — Plan Mode:",
+            "- FIRST: Analyze the codebase and create a detailed implementation plan",
+            "- List the files you will modify and what changes you will make in each",
+            "- THEN: Implement the plan step by step",
+            "- Do not start editing files until your plan is complete",
+        ])
 
     if error_context:
         parts.extend([

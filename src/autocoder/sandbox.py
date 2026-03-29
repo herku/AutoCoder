@@ -14,6 +14,7 @@ class SandboxConfig:
     allowed_tools: list[str]
     docker: bool
     docker_image: str = "autocoder-sandbox"
+    plan_mode: bool = False
 
 
 def build_sandbox(cfg: RunConfig) -> SandboxConfig:
@@ -47,7 +48,7 @@ def build_sandbox(cfg: RunConfig) -> SandboxConfig:
         "Bash(go:*)",
     ])
 
-    return SandboxConfig(allowed_tools=tools, docker=cfg.docker)
+    return SandboxConfig(allowed_tools=tools, docker=cfg.docker, plan_mode=cfg.plan_mode)
 
 
 def build_claude_cmd(
@@ -65,6 +66,9 @@ def build_claude_cmd(
         "--output-format", "json",
         "--max-budget-usd", str(max_budget_usd),
     ]
+
+    if sandbox.plan_mode:
+        cmd.extend(["--permission-mode", "plan"])
 
     for tool in sandbox.allowed_tools:
         cmd.extend(["--allowedTools", tool])

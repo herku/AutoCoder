@@ -27,6 +27,7 @@ from autocoder.loop import run
 @click.option("--max-retries", default=3, type=int, help="Max retry attempts per issue")
 @click.option("--protect-tests", is_flag=True, default=False, help="Prevent agent from modifying test files")
 @click.option("--auto-merge", is_flag=True, default=False, help="Auto-review, fix, and squash-merge PRs after creation")
+@click.option("--plan-mode", is_flag=True, default=False, help="Agent plans before implementing each issue")
 @click.option(
     "--test-patterns",
     default="**/test_*,**/*_test.*,**/tests/**,**/*.test.*,**/*.spec.*",

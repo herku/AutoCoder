@@ -9,3 +9,4 @@ build/
 logs/
 .autocoder.lock
 .claude-home/
+.DS_Store

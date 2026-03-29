@@ -111,6 +111,7 @@ def _process_issue(
                 issue,
                 error_context=error_context,
                 repo_path=cfg.repo_path,
+                plan_mode=cfg.plan_mode,
             )
             max_budget = budget.remaining_for_issue_usd(cfg.model)
             agent_result = invoke_agent(prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox)

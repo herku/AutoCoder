@@ -75,6 +75,7 @@ class RunConfig:
     protect_tests: bool
     test_patterns: list[str]
     auto_merge: bool
+    plan_mode: bool
 
 
 @dataclass

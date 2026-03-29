@@ -25,6 +25,7 @@ def _make_config(test_cmd=None, lint_cmd=None, integration_cmd=None):
         protect_tests=False,
         test_patterns=[],
         auto_merge=False,
+        plan_mode=False,
     )
 
 

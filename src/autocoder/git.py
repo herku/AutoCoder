@@ -125,6 +125,10 @@ class GitOps:
 
     def commit_all(self, message: str) -> None:
         self._run("add", "-A")
+        # Check if there are staged changes to commit
+        status = self._run("diff", "--cached", "--quiet", check=False)
+        if status.returncode == 0:
+            raise RuntimeError("Agent produced no code changes to commit")
         self._run("commit", "-m", message)
 
     def push_branch(self, branch: str) -> None:
