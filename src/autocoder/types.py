@@ -110,6 +110,11 @@ class AgentError(Exception):
     pass
 
 
+class RateLimitError(AgentError):
+    """Claude CLI hit API rate limit — retrying is futile until reset."""
+    pass
+
+
 class VerificationError(Exception):
     def __init__(self, stage: str, output: str):
         self.stage = stage

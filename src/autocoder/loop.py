@@ -21,6 +21,7 @@ from autocoder.types import (
     AgentError,
     AntiCheatViolation,
     Outcome,
+    RateLimitError,
     RunConfig,
     TestPlanResult,
     VerificationError,
@@ -83,7 +84,13 @@ def run(cfg: RunConfig) -> None:
                 break
 
             print(f"[{i}/{len(issues)}] Processing #{issue.number}: {issue.title}")
-            _process_issue(issue, cfg, git, budget, log)
+            try:
+                _process_issue(issue, cfg, git, budget, log)
+            except RateLimitError as e:
+                log.log_event("rate_limited", error=str(e))
+                print(f"  Rate limit hit: {str(e)[:200]}")
+                print("  Stopping — retrying won't help until limit resets.")
+                break
 
         log.write_summary()
 
@@ -206,6 +213,13 @@ def _process_issue(
             )
             return
 
+        except RateLimitError:
+            if protected_files:
+                restore_test_files(protected_files)
+            git.rollback(checkpoint)
+            git.checkout_main()
+            raise  # Propagate to run() to stop all processing
+
         except (AgentError, VerificationError, AntiCheatViolation, RuntimeError) as e:
             # Restore test files on failure
             if protected_files:
@@ -284,6 +298,8 @@ def _post_pr_review_and_merge(
         try:
             fix_result = invoke_agent(fix_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox)
             budget.record(fix_result)
+        except RateLimitError:
+            raise
         except AgentError as e:
             print(f"  Fix agent failed: {str(e)[:100]}")
             return _do_merge(cfg.repo_path, pr_url, "Merged (fix agent failed, using original)")
@@ -305,6 +321,8 @@ def _post_pr_review_and_merge(
         git.push_branch(branch)
         return _do_merge(cfg.repo_path, pr_url, "Merged (with review fixes)")
 
+    except RateLimitError:
+        raise  # Propagate to stop all processing
     except Exception as e:
         print(f"  Review/merge error: {str(e)[:200]}")
         return _do_merge(cfg.repo_path, pr_url, "Merged (review failed, using original)")

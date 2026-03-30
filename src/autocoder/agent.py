@@ -6,9 +6,23 @@ import time
 
 from autocoder.issues import truncate_body
 from autocoder.sandbox import SandboxConfig, build_claude_cmd
-from autocoder.types import AgentResult, AgentError, Issue
+from autocoder.types import AgentResult, AgentError, RateLimitError, Issue
 
 PROMPT_BODY_MAX = 4000
+
+_RATE_LIMIT_PATTERNS = [
+    "hit your limit",
+    "rate limit",
+    "rate_limit",
+    "too many requests",
+    "quota exceeded",
+]
+
+
+def _is_rate_limited(text: str) -> bool:
+    """Check if text contains rate limit indicators."""
+    lower = text.lower()
+    return any(p in lower for p in _RATE_LIMIT_PATTERNS)
 
 
 def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", triage_model: str = "", plan_mode: bool = False) -> str:
@@ -76,14 +90,24 @@ def invoke_agent(
         try:
             data = json.loads(result.stdout)
             # Valid JSON response — parse it normally, is_error will be handled downstream
-            return _parse_agent_output(result.stdout, duration_ms, model)
+            parsed = _parse_agent_output(result.stdout, duration_ms, model)
+            if parsed.is_error and _is_rate_limited(parsed.result_text):
+                raise RateLimitError(parsed.result_text[:500])
+            return parsed
         except (json.JSONDecodeError, ValueError):
-            raise AgentError(
+            combined = f"{result.stderr} {result.stdout}"
+            msg = (
                 f"Claude CLI exited with code {result.returncode}: "
                 f"{result.stderr[:500] or result.stdout[:500]}"
             )
+            if _is_rate_limited(combined):
+                raise RateLimitError(msg)
+            raise AgentError(msg)
 
-    return _parse_agent_output(result.stdout, duration_ms, model)
+    parsed = _parse_agent_output(result.stdout, duration_ms, model)
+    if parsed.is_error and _is_rate_limited(parsed.result_text):
+        raise RateLimitError(parsed.result_text[:500])
+    return parsed
 
 
 def _parse_agent_output(raw: str, duration_ms: int, model: str) -> AgentResult:
