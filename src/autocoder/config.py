@@ -29,7 +29,8 @@ def build_config(
     protect_tests: bool,
     test_patterns: str,
     auto_merge: bool,
-    plan_mode: bool,
+    issues: tuple[int, ...] = (),
+    plan_mode: bool = False,
 ) -> RunConfig:
     repo_path = str(Path(repo).resolve())
 
@@ -75,6 +76,8 @@ def build_config(
                 "Run 'claude login' first, then retry with --docker."
             )
 
+    issue_numbers = list(issues)
+
     return RunConfig(
         repo_path=repo_path,
         labels=[l.strip() for l in labels.split(",") if l.strip()] if labels else [],
@@ -92,10 +95,11 @@ def build_config(
         docker=docker,
         log_dir=log_dir,
         dry_run=dry_run,
-        auto_prioritize=auto_prioritize,
+        auto_prioritize=False if issue_numbers else auto_prioritize,
         max_retries=max_retries,
         protect_tests=protect_tests,
         test_patterns=[p.strip() for p in test_patterns.split(",") if p.strip()],
         auto_merge=auto_merge,
         plan_mode=plan_mode,
+        issue_numbers=issue_numbers,
     )

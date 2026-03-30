@@ -76,6 +76,7 @@ class RunConfig:
     test_patterns: list[str]
     auto_merge: bool
     plan_mode: bool
+    issue_numbers: list[int] = field(default_factory=list)
 
 
 @dataclass

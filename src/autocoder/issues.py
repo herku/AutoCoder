@@ -14,6 +14,28 @@ PRIORITY_ORDER = [Priority.P0, Priority.P1, Priority.P2, Priority.P3]
 ISSUE_BODY_MAX_CHARS = 4000
 
 
+def fetch_issues_by_number(repo_path: str, numbers: list[int]) -> list[Issue]:
+    """Fetch specific issues by number via gh issue view."""
+    issues: list[Issue] = []
+    for num in numbers:
+        result = subprocess.run(
+            [
+                "gh", "issue", "view", str(num),
+                "--json", "number,title,body,labels,url",
+            ],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            print(f"  Warning: could not fetch issue #{num}: {result.stderr.strip()}", file=sys.stderr)
+            continue
+        raw = json.loads(result.stdout)
+        issues.append(_parse_issue(raw, ""))
+    return issues
+
+
 def fetch_issues(repo_path: str, labels: list[str], limit: int = 0) -> list[Issue]:
     """Fetch open issues. If limit > 0, cap the result count."""
     all_issues: list[Issue] = []

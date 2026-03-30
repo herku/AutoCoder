@@ -3,11 +3,11 @@ from __future__ import annotations
 import subprocess
 import sys
 
-from autocoder.agent import build_prompt, build_plan_prompt, build_implement_prompt, invoke_agent
+from autocoder.agent import build_prompt, build_plan_prompt, build_implement_prompt, invoke_agent, TIMEOUT_PLAN, TIMEOUT_IMPLEMENT
 from autocoder.anticheat import audit_diff, protect_test_files, restore_test_files
 from autocoder.budget import BudgetTracker
 from autocoder.git import GitOps
-from autocoder.issues import analyze_and_prioritize, fetch_issues
+from autocoder.issues import analyze_and_prioritize, fetch_issues, fetch_issues_by_number
 from autocoder.logger import RunLogger
 from autocoder.pr import comment_failure, create_pr, label_failed, mark_ready, merge_pr
 from autocoder.review import build_fix_prompt, review_pr_diff
@@ -41,12 +41,16 @@ def run(cfg: RunConfig) -> None:
     try:
         git.cleanup_orphan_branches()
 
-        # Stage 1: Fetch all issues (no limit)
-        if cfg.labels:
+        # Stage 1: Fetch issues
+        if cfg.issue_numbers:
+            print(f"Fetching issues: {', '.join(f'#{n}' for n in cfg.issue_numbers)}...")
+            issues = fetch_issues_by_number(cfg.repo_path, cfg.issue_numbers)
+        elif cfg.labels:
             print(f"Fetching issues with labels: {', '.join(cfg.labels)}...")
+            issues = fetch_issues(cfg.repo_path, cfg.labels, limit=cfg.max_analyze)
         else:
             print("Fetching all open issues...")
-        issues = fetch_issues(cfg.repo_path, cfg.labels, limit=cfg.max_analyze)
+            issues = fetch_issues(cfg.repo_path, cfg.labels, limit=cfg.max_analyze)
 
         if not issues:
             print("No issues found. Exiting.")
@@ -130,7 +134,8 @@ def _process_issue(
                 plan_prompt = build_plan_prompt(issue)
                 max_budget = budget.remaining_for_issue_usd(cfg.model)
                 plan_result = invoke_agent(
-                    plan_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, plan_sandbox
+                    plan_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, plan_sandbox,
+                    timeout=TIMEOUT_PLAN,
                 )
                 budget.record(plan_result)
                 if plan_result.is_error:
