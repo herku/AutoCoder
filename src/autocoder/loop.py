@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 
-from autocoder.agent import build_prompt, invoke_agent
+from autocoder.agent import build_prompt, build_plan_prompt, build_implement_prompt, invoke_agent
 from autocoder.anticheat import audit_diff, protect_test_files, restore_test_files
 from autocoder.budget import BudgetTracker
 from autocoder.git import GitOps
@@ -11,7 +11,7 @@ from autocoder.issues import analyze_and_prioritize, fetch_issues
 from autocoder.logger import RunLogger
 from autocoder.pr import comment_failure, create_pr, label_failed, mark_ready, merge_pr
 from autocoder.review import build_fix_prompt, review_pr_diff
-from autocoder.sandbox import SandboxConfig, build_sandbox
+from autocoder.sandbox import SandboxConfig, build_sandbox, build_plan_sandbox
 from autocoder.testplan import (
     build_test_plan_fix_prompt,
     extract_acceptance_criteria,
@@ -25,6 +25,7 @@ from autocoder.types import (
     RunConfig,
     TestPlanResult,
     VerificationError,
+    commit_prefix,
 )
 from autocoder.verify import format_failure, run_verification
 
@@ -105,6 +106,7 @@ def _process_issue(
     agent_result = None
     verify_results = []
     sandbox = build_sandbox(cfg)
+    plan_sandbox = build_plan_sandbox(cfg) if cfg.plan_mode else None
     budget.reset_issue()
 
     for attempt in range(1, cfg.max_retries + 1):
@@ -122,12 +124,28 @@ def _process_issue(
 
             # Stage 3: Agent execution
             print(f"  Attempt {attempt}/{cfg.max_retries}: Running agent...")
-            prompt = build_prompt(
-                issue,
-                error_context=error_context,
-                repo_path=cfg.repo_path,
-                plan_mode=cfg.plan_mode,
-            )
+
+            if cfg.plan_mode and plan_sandbox:
+                # Phase 1: Plan (read-only)
+                plan_prompt = build_plan_prompt(issue)
+                max_budget = budget.remaining_for_issue_usd(cfg.model)
+                plan_result = invoke_agent(
+                    plan_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, plan_sandbox
+                )
+                budget.record(plan_result)
+                if plan_result.is_error:
+                    raise AgentError(plan_result.result_text)
+                plan_text = plan_result.result_text
+
+                # Phase 2: Implement with plan context
+                prompt = build_implement_prompt(issue, plan_text, error_context)
+            else:
+                prompt = build_prompt(
+                    issue,
+                    error_context=error_context,
+                    repo_path=cfg.repo_path,
+                )
+
             max_budget = budget.remaining_for_issue_usd(cfg.model)
             agent_result = invoke_agent(prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox)
             budget.record(agent_result)
@@ -186,7 +204,7 @@ def _process_issue(
 
             # Stage 5: Commit and PR
             diff_stats = git.diff_stats()
-            git.commit_all(f"fix: resolve #{issue.number} — {issue.title}")
+            git.commit_all(f"{commit_prefix(issue)}: resolve #{issue.number} — {issue.title}")
             main_branch = git.get_main_branch()
             summary = agent_result.result_text[:500] if agent_result else ""
             pr_url = create_pr(
@@ -317,7 +335,7 @@ def _post_pr_review_and_merge(
             return _do_merge(cfg.repo_path, pr_url, "Merged (fix broke tests, reverted)")
 
         # Push review fixes
-        git.commit_all(f"fix: address review feedback for #{issue.number}")
+        git.commit_all(f"{commit_prefix(issue)}: address review feedback for #{issue.number}")
         git.push_branch(branch)
         return _do_merge(cfg.repo_path, pr_url, "Merged (with review fixes)")
 

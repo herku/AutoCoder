@@ -8,6 +8,17 @@ from pathlib import Path
 
 from autocoder.types import LockError
 
+_PLAN_ONLY_PATTERN = re.compile(
+    r"^(PLAN[-_].*\.md|plan[-_].*\.md|TODO[-_].*\.md|IMPLEMENTATION[-_].*\.md)$",
+    re.IGNORECASE,
+)
+
+
+def _is_plan_only_file(filepath: str) -> bool:
+    """Check if a file is a plan/documentation artifact, not source code."""
+    basename = os.path.basename(filepath)
+    return bool(_PLAN_ONLY_PATTERN.match(basename))
+
 
 def _slugify(title: str, max_len: int = 40) -> str:
     """Convert issue title to a branch-name-safe slug."""
@@ -129,6 +140,16 @@ class GitOps:
         status = self._run("diff", "--cached", "--quiet", check=False)
         if status.returncode == 0:
             raise RuntimeError("Agent produced no code changes to commit")
+
+        # Guard against plan-only commits (no actual source changes)
+        staged = self._run("diff", "--cached", "--name-only")
+        files = [f for f in staged.stdout.strip().split("\n") if f]
+        source_files = [f for f in files if not _is_plan_only_file(f)]
+        if not source_files:
+            raise RuntimeError(
+                "Agent produced only plan/documentation files, no source code changes"
+            )
+
         self._run("commit", "-m", message)
 
     def push_branch(self, branch: str) -> None:

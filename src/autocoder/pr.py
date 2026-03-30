@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from typing import Optional
 
-from autocoder.types import Issue, PlanCheckItem, VerifyResult
+from autocoder.types import Issue, PlanCheckItem, VerifyResult, commit_prefix
 
 
 def create_pr(
@@ -29,7 +29,7 @@ def create_pr(
         raise RuntimeError(f"git push failed: {push.stderr.strip()}")
 
     # Create draft PR
-    title = f"fix: {issue.title} (#{issue.number})"
+    title = f"{commit_prefix(issue)}: {issue.title} (#{issue.number})"
     if len(title) > 70:
         title = title[:67] + "..."
 

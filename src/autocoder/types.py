@@ -128,3 +128,22 @@ class AntiCheatViolation(Exception):
 
 class LockError(Exception):
     pass
+
+
+_BUG_LABELS = {"bug", "bugfix", "defect", "regression", "error", "crash"}
+
+
+def commit_prefix(issue: Issue) -> str:
+    """Return conventional commit prefix based on issue labels."""
+    lower_labels = {label.lower() for label in issue.labels}
+    if lower_labels & _BUG_LABELS:
+        return "fix"
+    return "feat"
+
+
+def action_verb(issue: Issue) -> str:
+    """Return action verb for prompts based on issue type."""
+    lower_labels = {label.lower() for label in issue.labels}
+    if lower_labels & _BUG_LABELS:
+        return "Fix"
+    return "Implement"

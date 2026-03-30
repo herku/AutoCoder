@@ -6,7 +6,7 @@ import time
 
 from autocoder.issues import truncate_body
 from autocoder.sandbox import SandboxConfig, build_claude_cmd
-from autocoder.types import AgentResult, AgentError, RateLimitError, Issue
+from autocoder.types import AgentResult, AgentError, RateLimitError, Issue, action_verb
 
 PROMPT_BODY_MAX = 4000
 
@@ -27,9 +27,10 @@ def _is_rate_limited(text: str) -> bool:
 
 def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", triage_model: str = "", plan_mode: bool = False) -> str:
     body = truncate_body(issue.body, PROMPT_BODY_MAX)
+    verb = action_verb(issue)
 
     parts = [
-        f"Fix GitHub issue #{issue.number}: {issue.title}\n",
+        f"{verb} GitHub issue #{issue.number}: {issue.title}\n",
         f"Issue body:\n{body}\n",
         "Instructions:",
         "- Read relevant source files before making changes",
@@ -40,20 +41,64 @@ def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", tri
         "- Keep changes minimal and focused on the issue",
     ]
 
-    if plan_mode:
-        parts.extend([
-            "",
-            "IMPORTANT — Plan Mode:",
-            "- FIRST: Analyze the codebase and create a detailed implementation plan",
-            "- List the files you will modify and what changes you will make in each",
-            "- THEN: Implement the plan step by step",
-            "- Do not start editing files until your plan is complete",
-        ])
-
     if error_context:
         parts.extend([
             "\n--- PREVIOUS ATTEMPT FAILED ---",
             "The previous attempt to fix this issue failed with these errors.",
+            "Try a DIFFERENT approach this time:\n",
+            error_context,
+            "--- END PREVIOUS ERRORS ---",
+        ])
+
+    return "\n".join(parts)
+
+
+def build_plan_prompt(issue: Issue) -> str:
+    """Build a prompt for the planning phase (read-only analysis)."""
+    body = truncate_body(issue.body, PROMPT_BODY_MAX)
+    verb = action_verb(issue)
+
+    parts = [
+        f"Analyze GitHub issue #{issue.number}: {issue.title}\n",
+        f"Issue body:\n{body}\n",
+        "Instructions:",
+        "- Read and analyze the codebase to understand the current architecture",
+        "- Identify all files that need to be created or modified",
+        "- Create a detailed implementation plan with specific changes for each file",
+        "- List any dependencies or ordering constraints",
+        "- Do NOT make any file changes — only analyze and plan",
+        "",
+        "Output a detailed implementation plan as text.",
+    ]
+    return "\n".join(parts)
+
+
+def build_implement_prompt(issue: Issue, plan_text: str, error_context: str = "") -> str:
+    """Build a prompt for the implementation phase, with plan as context."""
+    body = truncate_body(issue.body, PROMPT_BODY_MAX)
+    verb = action_verb(issue)
+
+    parts = [
+        f"{verb} GitHub issue #{issue.number}: {issue.title}\n",
+        f"Issue body:\n{body}\n",
+        "--- IMPLEMENTATION PLAN ---",
+        "Follow this plan that was created after analyzing the codebase:\n",
+        plan_text,
+        "\n--- END PLAN ---\n",
+        "Instructions:",
+        "- Implement the plan above step by step",
+        "- Read relevant source files before making changes",
+        "- Write or update tests that verify your changes",
+        "- Do NOT modify existing test assertions unless the issue specifically requires it",
+        "- Do NOT delete or comment out existing tests",
+        "- Run the test suite to verify your changes work",
+        "- Keep changes minimal and focused on the issue",
+    ]
+
+    if error_context:
+        parts.extend([
+            "\n--- PREVIOUS ATTEMPT FAILED ---",
+            "The previous attempt failed with these errors.",
             "Try a DIFFERENT approach this time:\n",
             error_context,
             "--- END PREVIOUS ERRORS ---",
