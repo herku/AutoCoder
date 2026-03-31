@@ -116,6 +116,11 @@ class RateLimitError(AgentError):
     pass
 
 
+class AuthenticationError(AgentError):
+    """OAuth token expired or invalid — retrying is futile until re-authenticated."""
+    pass
+
+
 class VerificationError(Exception):
     def __init__(self, stage: str, output: str):
         self.stage = stage

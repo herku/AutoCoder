@@ -6,7 +6,7 @@ import time
 
 from autocoder.issues import truncate_body
 from autocoder.sandbox import SandboxConfig, build_claude_cmd
-from autocoder.types import AgentResult, AgentError, RateLimitError, Issue, action_verb
+from autocoder.types import AgentResult, AgentError, AuthenticationError, RateLimitError, Issue, action_verb
 
 PROMPT_BODY_MAX = 4000
 
@@ -18,11 +18,24 @@ _RATE_LIMIT_PATTERNS = [
     "quota exceeded",
 ]
 
+_AUTH_ERROR_PATTERNS = [
+    "authentication_error",
+    "token has expired",
+    "failed to authenticate",
+    "unauthorized",
+]
+
 
 def _is_rate_limited(text: str) -> bool:
     """Check if text contains rate limit indicators."""
     lower = text.lower()
     return any(p in lower for p in _RATE_LIMIT_PATTERNS)
+
+
+def _is_auth_error(text: str) -> bool:
+    """Check if text contains authentication failure indicators."""
+    lower = text.lower()
+    return any(p in lower for p in _AUTH_ERROR_PATTERNS)
 
 
 def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", triage_model: str = "", plan_mode: bool = False) -> str:
@@ -143,6 +156,8 @@ def invoke_agent(
             parsed = _parse_agent_output(result.stdout, duration_ms, model)
             if parsed.is_error and _is_rate_limited(parsed.result_text):
                 raise RateLimitError(parsed.result_text[:500])
+            if parsed.is_error and _is_auth_error(parsed.result_text):
+                raise AuthenticationError(parsed.result_text[:500])
             return parsed
         except (json.JSONDecodeError, ValueError):
             combined = f"{result.stderr} {result.stdout}"
@@ -152,11 +167,15 @@ def invoke_agent(
             )
             if _is_rate_limited(combined):
                 raise RateLimitError(msg)
+            if _is_auth_error(combined):
+                raise AuthenticationError(msg)
             raise AgentError(msg)
 
     parsed = _parse_agent_output(result.stdout, duration_ms, model)
     if parsed.is_error and _is_rate_limited(parsed.result_text):
         raise RateLimitError(parsed.result_text[:500])
+    if parsed.is_error and _is_auth_error(parsed.result_text):
+        raise AuthenticationError(parsed.result_text[:500])
     return parsed
 
 

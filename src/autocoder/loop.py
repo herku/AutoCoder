@@ -22,6 +22,7 @@ from autocoder.testplan import (
 from autocoder.types import (
     AgentError,
     AntiCheatViolation,
+    AuthenticationError,
     Outcome,
     RateLimitError,
     RunConfig,
@@ -166,6 +167,11 @@ def run(cfg: RunConfig) -> None:
                 log.log_event("rate_limited", error=str(e))
                 print(f"  Rate limit hit: {str(e)[:200]}")
                 print("  Stopping — retrying won't help until limit resets.")
+                break
+            except AuthenticationError as e:
+                log.log_event("auth_failed", error=str(e))
+                print(f"  Authentication failed: {str(e)[:200]}")
+                print("  Stopping — token expired or invalid. Re-authenticate and retry.")
                 break
 
         _print_timing_summary(timings)
