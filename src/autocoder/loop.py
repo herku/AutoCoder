@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
+from dataclasses import dataclass
 
 from autocoder.agent import build_prompt, build_plan_prompt, build_implement_prompt, invoke_agent, TIMEOUT_PLAN, TIMEOUT_IMPLEMENT
 from autocoder.anticheat import audit_diff, protect_test_files, restore_test_files
@@ -30,10 +32,77 @@ from autocoder.types import (
 from autocoder.verify import format_failure, run_verification
 
 
+# ---------------------------------------------------------------------------
+# Step timing
+# ---------------------------------------------------------------------------
+
+def _fmt_dur(ms: int) -> str:
+    if ms >= 60_000:
+        return f"{ms / 60_000:.1f}m"
+    if ms >= 1000:
+        return f"{ms / 1000:.1f}s"
+    return f"{ms}ms"
+
+
+@dataclass
+class StepTiming:
+    name: str
+    duration_ms: int
+
+
+class StepTimings:
+    def __init__(self) -> None:
+        self._steps: list[StepTiming] = []
+
+    def record(self, name: str, duration_ms: int) -> None:
+        self._steps.append(StepTiming(name, duration_ms))
+
+    @property
+    def steps(self) -> list[StepTiming]:
+        return list(self._steps)
+
+    @property
+    def total_ms(self) -> int:
+        return sum(s.duration_ms for s in self._steps)
+
+
+class StepTimer:
+    """Context manager that times a step, prints it, and records it."""
+
+    def __init__(self, name: str, timings: StepTimings) -> None:
+        self._name = name
+        self._timings = timings
+        self._start: float = 0
+
+    def __enter__(self) -> "StepTimer":
+        self._start = time.monotonic()
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        duration_ms = int((time.monotonic() - self._start) * 1000)
+        self._timings.record(self._name, duration_ms)
+        print(f"  \u23f1 {self._name}: {_fmt_dur(duration_ms)}")
+        return False
+
+
+def _print_timing_summary(timings: StepTimings) -> None:
+    steps = timings.steps
+    if not steps:
+        return
+    max_name = max(len(s.name) for s in steps)
+    w = max(max_name, 5) + 2
+    print(f"\nStep Timings:")
+    for s in steps:
+        print(f"  {s.name:<{w}} {_fmt_dur(s.duration_ms):>10}")
+    print(f"  {'─' * (w + 10)}")
+    print(f"  {'TOTAL':<{w}} {_fmt_dur(timings.total_ms):>10}")
+
+
 def run(cfg: RunConfig) -> None:
     log = RunLogger(cfg.log_dir)
     budget = BudgetTracker(cfg.token_budget, cfg.daily_cap)
     git = GitOps(cfg.repo_path)
+    timings = StepTimings()
 
     # Startup — check clean BEFORE creating lockfile
     git.assert_clean()
@@ -42,15 +111,16 @@ def run(cfg: RunConfig) -> None:
         git.cleanup_orphan_branches()
 
         # Stage 1: Fetch issues
-        if cfg.issue_numbers:
-            print(f"Fetching issues: {', '.join(f'#{n}' for n in cfg.issue_numbers)}...")
-            issues = fetch_issues_by_number(cfg.repo_path, cfg.issue_numbers)
-        elif cfg.labels:
-            print(f"Fetching issues with labels: {', '.join(cfg.labels)}...")
-            issues = fetch_issues(cfg.repo_path, cfg.labels, limit=cfg.max_analyze)
-        else:
-            print("Fetching all open issues...")
-            issues = fetch_issues(cfg.repo_path, cfg.labels, limit=cfg.max_analyze)
+        with StepTimer("fetch_issues", timings):
+            if cfg.issue_numbers:
+                print(f"Fetching issues: {', '.join(f'#{n}' for n in cfg.issue_numbers)}...")
+                issues = fetch_issues_by_number(cfg.repo_path, cfg.issue_numbers)
+            elif cfg.labels:
+                print(f"Fetching issues with labels: {', '.join(cfg.labels)}...")
+                issues = fetch_issues(cfg.repo_path, cfg.labels, limit=cfg.max_analyze)
+            else:
+                print("Fetching all open issues...")
+                issues = fetch_issues(cfg.repo_path, cfg.labels, limit=cfg.max_analyze)
 
         if not issues:
             print("No issues found. Exiting.")
@@ -63,7 +133,8 @@ def run(cfg: RunConfig) -> None:
         dependencies: dict[int, list[int]] = {}
         if cfg.auto_prioritize:
             print(f"Analyzing {len(issues)} issues for AI auto-prioritization...")
-            issues, reasons, dependencies = analyze_and_prioritize(issues, cfg.repo_path, cfg.triage_model)
+            with StepTimer("prioritize", timings):
+                issues, reasons, dependencies = analyze_and_prioritize(issues, cfg.repo_path, cfg.triage_model)
             log.log_prioritization(issues, reasons, dependencies)
             parts = []
             for i in issues:
@@ -90,13 +161,15 @@ def run(cfg: RunConfig) -> None:
 
             print(f"[{i}/{len(issues)}] Processing #{issue.number}: {issue.title}")
             try:
-                _process_issue(issue, cfg, git, budget, log)
+                _process_issue(issue, cfg, git, budget, log, timings)
             except RateLimitError as e:
                 log.log_event("rate_limited", error=str(e))
                 print(f"  Rate limit hit: {str(e)[:200]}")
                 print("  Stopping — retrying won't help until limit resets.")
                 break
 
+        _print_timing_summary(timings)
+        log.log_timings(timings.steps)
         log.write_summary()
 
     finally:
@@ -104,7 +177,8 @@ def run(cfg: RunConfig) -> None:
 
 
 def _process_issue(
-    issue, cfg: RunConfig, git: GitOps, budget: BudgetTracker, log: RunLogger
+    issue, cfg: RunConfig, git: GitOps, budget: BudgetTracker, log: RunLogger,
+    timings: StepTimings,
 ) -> None:
     error_context = ""
     agent_result = None
@@ -112,14 +186,17 @@ def _process_issue(
     sandbox = build_sandbox(cfg)
     plan_sandbox = build_plan_sandbox(cfg) if cfg.plan_mode else None
     budget.reset_issue()
+    tag = f"#{issue.number}"
 
     for attempt in range(1, cfg.max_retries + 1):
         agent_result = None
         verify_results = []
         protected_files: list[str] = []
+        att = f"att{attempt}"
 
         checkpoint = git.save_checkpoint()
-        branch = git.create_branch(issue.number, issue.title)
+        with StepTimer(f"create_branch {tag}", timings):
+            branch = git.create_branch(issue.number, issue.title)
 
         try:
             # Protect test files if enabled
@@ -131,12 +208,13 @@ def _process_issue(
 
             if cfg.plan_mode and plan_sandbox:
                 # Phase 1: Plan (read-only)
-                plan_prompt = build_plan_prompt(issue)
-                max_budget = budget.remaining_for_issue_usd(cfg.model)
-                plan_result = invoke_agent(
-                    plan_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, plan_sandbox,
-                    timeout=TIMEOUT_PLAN,
-                )
+                with StepTimer(f"plan {tag} {att}", timings):
+                    plan_prompt = build_plan_prompt(issue)
+                    max_budget = budget.remaining_for_issue_usd(cfg.model)
+                    plan_result = invoke_agent(
+                        plan_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, plan_sandbox,
+                        timeout=TIMEOUT_PLAN,
+                    )
                 budget.record(plan_result)
                 if plan_result.is_error:
                     raise AgentError(plan_result.result_text)
@@ -151,8 +229,9 @@ def _process_issue(
                     repo_path=cfg.repo_path,
                 )
 
-            max_budget = budget.remaining_for_issue_usd(cfg.model)
-            agent_result = invoke_agent(prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox)
+            with StepTimer(f"agent {tag} {att}", timings):
+                max_budget = budget.remaining_for_issue_usd(cfg.model)
+                agent_result = invoke_agent(prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox)
             budget.record(agent_result)
 
             if agent_result.is_error:
@@ -165,11 +244,13 @@ def _process_issue(
 
             # Anti-cheat audit
             if cfg.protect_tests:
-                audit_diff(cfg.repo_path, cfg.test_patterns)
+                with StepTimer(f"anticheat {tag}", timings):
+                    audit_diff(cfg.repo_path, cfg.test_patterns)
 
             # Stage 4: Verification
             print(f"  Running verification...")
-            verify_results = run_verification(cfg)
+            with StepTimer(f"verify {tag} {att}", timings):
+                verify_results = run_verification(cfg)
 
             if not all(v.passed for v in verify_results):
                 failed = next(v for v in verify_results if not v.passed)
@@ -181,7 +262,8 @@ def _process_issue(
             criteria = extract_acceptance_criteria(issue.body)
             if criteria:
                 print(f"  Verifying test plan ({len(criteria)} criteria)...")
-                test_plan = verify_test_plan(issue, git.diff_full(), cfg.repo_path, cfg.model)
+                with StepTimer(f"test_plan {tag}", timings):
+                    test_plan = verify_test_plan(issue, git.diff_full(), cfg.repo_path, cfg.model)
 
                 if not test_plan.all_passed:
                     failed_items = [i for i in test_plan.items if i.status == "fail"]
@@ -189,16 +271,18 @@ def _process_issue(
                     for item in failed_items:
                         print(f"    - {item.criterion[:80]}")
 
-                    fix_prompt = build_test_plan_fix_prompt(issue, failed_items)
-                    max_budget = budget.remaining_for_issue_usd(cfg.model)
-                    fix_result = invoke_agent(
-                        fix_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox
-                    )
+                    with StepTimer(f"test_plan_fix {tag}", timings):
+                        fix_prompt = build_test_plan_fix_prompt(issue, failed_items)
+                        max_budget = budget.remaining_for_issue_usd(cfg.model)
+                        fix_result = invoke_agent(
+                            fix_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox
+                        )
                     budget.record(fix_result)
 
                     if not fix_result.is_error:
                         print(f"  Re-verifying after test plan fix...")
-                        verify_results = run_verification(cfg)
+                        with StepTimer(f"re_verify {tag}", timings):
+                            verify_results = run_verification(cfg)
                         if not all(v.passed for v in verify_results):
                             failed = next(v for v in verify_results if not v.passed)
                             error_context = format_failure(failed)
@@ -208,24 +292,26 @@ def _process_issue(
                     print(f"  Test plan: all criteria met.")
 
             # Stage 5: Commit and PR
-            diff_stats = git.diff_stats()
-            git.commit_all(f"{commit_prefix(issue)}: resolve #{issue.number} — {issue.title}")
-            main_branch = git.get_main_branch()
-            summary = agent_result.result_text[:500] if agent_result else ""
-            pr_url = create_pr(
-                cfg.repo_path, issue, branch, base=main_branch,
-                summary=summary,
-                diff_stats=diff_stats,
-                test_plan_items=test_plan.items or None,
-                verify_results=verify_results,
-            )
+            with StepTimer(f"commit_pr {tag}", timings):
+                diff_stats = git.diff_stats()
+                git.commit_all(f"{commit_prefix(issue)}: resolve #{issue.number} — {issue.title}")
+                main_branch = git.get_main_branch()
+                summary = agent_result.result_text[:500] if agent_result else ""
+                pr_url = create_pr(
+                    cfg.repo_path, issue, branch, base=main_branch,
+                    summary=summary,
+                    diff_stats=diff_stats,
+                    test_plan_items=test_plan.items or None,
+                    verify_results=verify_results,
+                )
 
             # Stage 6: Post-PR review and merge (if enabled)
             if cfg.auto_merge:
                 print(f"  Draft PR created: {pr_url}")
-                merge_status = _post_pr_review_and_merge(
-                    cfg, git, budget, issue, branch, pr_url, sandbox,
-                )
+                with StepTimer(f"review_merge {tag}", timings):
+                    merge_status = _post_pr_review_and_merge(
+                        cfg, git, budget, issue, branch, pr_url, sandbox,
+                    )
                 print(f"  {merge_status}\n")
             else:
                 print(f"  PR created: {pr_url}\n")

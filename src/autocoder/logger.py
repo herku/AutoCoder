@@ -102,6 +102,16 @@ class RunLogger:
         }
         self._append(self._log_path, record)
 
+    def log_timings(self, steps: list) -> None:
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": self._run_id,
+            "event": "step_timings",
+            "steps": [{"name": s.name, "duration_ms": s.duration_ms} for s in steps],
+            "total_ms": sum(s.duration_ms for s in steps),
+        }
+        self._append(self._log_path, record)
+
     def dead_letter(self, issue: Issue, error: str) -> None:
         self._append(
             self._dead_letter_path,
