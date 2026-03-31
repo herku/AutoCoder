@@ -216,9 +216,9 @@ def _process_issue(
                 # Phase 1: Plan (read-only)
                 with StepTimer(f"plan {tag} {att}", timings):
                     plan_prompt = build_plan_prompt(issue)
-                    max_budget = budget.remaining_for_issue_usd(cfg.model)
+                    max_budget = budget.remaining_for_issue_usd(cfg.plan_model)
                     plan_result = invoke_agent(
-                        plan_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, plan_sandbox,
+                        plan_prompt, cfg.repo_path, cfg.plan_model, cfg.effort, max_budget, plan_sandbox,
                         timeout=TIMEOUT_PLAN,
                     )
                 budget.record(plan_result)
@@ -396,7 +396,7 @@ def _post_pr_review_and_merge(
         # Review the diff
         print("  Running code review...")
         diff = git.diff_full()
-        review = review_pr_diff(diff, cfg.repo_path, cfg.model)
+        review = review_pr_diff(diff, cfg.repo_path, cfg.review_model)
 
         if not review.has_actionable_issues:
             print("  Review: no critical/medium issues found.")

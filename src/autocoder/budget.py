@@ -10,6 +10,15 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
 }
 
 
+def model_family_name(model: str) -> str:
+    """Extract model family name for pricing lookup."""
+    lower = model.lower()
+    for family in MODEL_PRICING:
+        if family in lower:
+            return family
+    return model
+
+
 class BudgetTracker:
     def __init__(self, per_issue_token_budget: int, daily_cap_tokens: int):
         self.per_issue_token_budget = per_issue_token_budget
@@ -34,7 +43,8 @@ class BudgetTracker:
         remaining_tokens = self.per_issue_token_budget - self._issue_tokens
         if remaining_tokens <= 0:
             return 0.01  # minimum to let claude report budget exceeded
-        input_price, output_price = MODEL_PRICING.get(model, (3.0, 15.0))
+        family = model_family_name(model)
+        input_price, output_price = MODEL_PRICING.get(family, (3.0, 15.0))
         # Assume 60% input, 40% output ratio
         estimated_cost = (remaining_tokens * 0.6 * input_price + remaining_tokens * 0.4 * output_price) / 1_000_000
         return round(max(estimated_cost, 0.01), 2)

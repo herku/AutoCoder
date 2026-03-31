@@ -10,6 +10,8 @@ def _make_config(test_cmd=None, lint_cmd=None, integration_cmd=None):
         lint_cmd=lint_cmd,
         integration_cmd=integration_cmd,
         model="sonnet",
+        plan_model="opus",
+        review_model="opus",
         effort="max",
         triage_model="haiku",
         max_issues=10,

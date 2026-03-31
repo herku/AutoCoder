@@ -60,6 +60,8 @@ class RunConfig:
     lint_cmd: Optional[str]
     integration_cmd: Optional[str]
     model: str
+    plan_model: str
+    review_model: str
     effort: str
     triage_model: str
     max_issues: int
