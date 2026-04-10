@@ -17,7 +17,26 @@ def create_pr(
     test_plan_items: Optional[list[PlanCheckItem]] = None,
     verify_results: Optional[list[VerifyResult]] = None,
 ) -> str:
-    # Push branch
+    # Ensure base branch exists on remote (needed for new repos)
+    check_base = subprocess.run(
+        ["git", "ls-remote", "--heads", "origin", base],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if not check_base.stdout.strip():
+        push_base = subprocess.run(
+            ["git", "push", "-u", "origin", base],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if push_base.returncode != 0:
+            raise RuntimeError(f"git push base branch failed: {push_base.stderr.strip()}")
+
+    # Push feature branch
     push = subprocess.run(
         ["git", "push", "-u", "origin", branch, "--force-with-lease"],
         cwd=repo_path,
