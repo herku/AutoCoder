@@ -5,6 +5,7 @@ import subprocess
 import time
 
 from autocoder.issues import truncate_body
+from autocoder.prompts import load
 from autocoder.sandbox import SandboxConfig, build_claude_cmd
 from autocoder.types import AgentResult, AgentError, AuthenticationError, RateLimitError, Issue, action_verb
 
@@ -38,86 +39,52 @@ def _is_auth_error(text: str) -> bool:
     return any(p in lower for p in _AUTH_ERROR_PATTERNS)
 
 
+def _error_block(ctx: str, message: str = "The previous attempt to fix this issue failed with these errors.") -> str:
+    if not ctx:
+        return ""
+    return (
+        "\n\n--- PREVIOUS ATTEMPT FAILED ---\n"
+        f"{message}\n"
+        "Try a DIFFERENT approach this time:\n\n"
+        f"{ctx}\n"
+        "--- END PREVIOUS ERRORS ---"
+    )
+
+
 def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", triage_model: str = "", plan_mode: bool = False) -> str:
     body = truncate_body(issue.body, PROMPT_BODY_MAX)
     verb = action_verb(issue)
-
-    parts = [
-        f"{verb} GitHub issue #{issue.number}: {issue.title}\n",
-        f"Issue body:\n{body}\n",
-        "Instructions:",
-        "- Read relevant source files before making changes",
-        "- Write or update tests that verify your fix",
-        "- Do NOT modify existing test assertions unless the issue specifically requires it",
-        "- Do NOT delete or comment out existing tests",
-        "- Run the test suite to verify your changes work",
-        "- Keep changes minimal and focused on the issue",
-    ]
-
-    if error_context:
-        parts.extend([
-            "\n--- PREVIOUS ATTEMPT FAILED ---",
-            "The previous attempt to fix this issue failed with these errors.",
-            "Try a DIFFERENT approach this time:\n",
-            error_context,
-            "--- END PREVIOUS ERRORS ---",
-        ])
-
-    return "\n".join(parts)
+    return load("implement").format(
+        verb=verb,
+        issue_number=issue.number,
+        issue_title=issue.title,
+        body=body,
+        error_context_block=_error_block(error_context),
+    )
 
 
 def build_plan_prompt(issue: Issue) -> str:
     """Build a prompt for the planning phase (read-only analysis)."""
     body = truncate_body(issue.body, PROMPT_BODY_MAX)
-    verb = action_verb(issue)
-
-    parts = [
-        f"Analyze GitHub issue #{issue.number}: {issue.title}\n",
-        f"Issue body:\n{body}\n",
-        "Instructions:",
-        "- Read and analyze the codebase to understand the current architecture",
-        "- Identify all files that need to be created or modified",
-        "- Create a detailed implementation plan with specific changes for each file",
-        "- List any dependencies or ordering constraints",
-        "- Do NOT make any file changes — only analyze and plan",
-        "",
-        "Output a detailed implementation plan as text.",
-    ]
-    return "\n".join(parts)
+    return load("plan").format(
+        issue_number=issue.number,
+        issue_title=issue.title,
+        body=body,
+    )
 
 
 def build_implement_prompt(issue: Issue, plan_text: str, error_context: str = "") -> str:
     """Build a prompt for the implementation phase, with plan as context."""
     body = truncate_body(issue.body, PROMPT_BODY_MAX)
     verb = action_verb(issue)
-
-    parts = [
-        f"{verb} GitHub issue #{issue.number}: {issue.title}\n",
-        f"Issue body:\n{body}\n",
-        "--- IMPLEMENTATION PLAN ---",
-        "Follow this plan that was created after analyzing the codebase:\n",
-        plan_text,
-        "\n--- END PLAN ---\n",
-        "Instructions:",
-        "- Implement the plan above step by step",
-        "- Read relevant source files before making changes",
-        "- Write or update tests that verify your changes",
-        "- Do NOT modify existing test assertions unless the issue specifically requires it",
-        "- Do NOT delete or comment out existing tests",
-        "- Run the test suite to verify your changes work",
-        "- Keep changes minimal and focused on the issue",
-    ]
-
-    if error_context:
-        parts.extend([
-            "\n--- PREVIOUS ATTEMPT FAILED ---",
-            "The previous attempt failed with these errors.",
-            "Try a DIFFERENT approach this time:\n",
-            error_context,
-            "--- END PREVIOUS ERRORS ---",
-        ])
-
-    return "\n".join(parts)
+    return load("implement_with_plan").format(
+        verb=verb,
+        issue_number=issue.number,
+        issue_title=issue.title,
+        body=body,
+        plan_text=plan_text,
+        error_context_block=_error_block(error_context, "The previous attempt failed with these errors."),
+    )
 
 
 TIMEOUT_PLAN = 3600  # 60 minutes for plan phase (read-only analysis)
@@ -131,39 +98,11 @@ CLAUDE_MD_DIFF_MAX = 30_000
 def build_update_claude_md_prompt(diff: str, existing_claude_md: str | None) -> str:
     """Build a prompt for updating the repo's CLAUDE.md with architecture info."""
     truncated_diff = diff[:CLAUDE_MD_DIFF_MAX] if len(diff) > CLAUDE_MD_DIFF_MAX else diff
-
-    parts = [
-        "You are updating CLAUDE.md — a project memory file that documents architecture,",
-        "conventions, and patterns for future AI coding sessions.",
-        "",
-        "## Current CLAUDE.md",
-    ]
-
-    if existing_claude_md:
-        parts.append(existing_claude_md)
-    else:
-        parts.append("(No CLAUDE.md exists yet. Create one from scratch.)")
-
-    parts.extend([
-        "",
-        "## Recent Changes (git diff)",
-        "```",
-        truncated_diff,
-        "```",
-        "",
-        "## Instructions",
-        "- Analyze the diff for architectural patterns, conventions, and structural decisions",
-        "- Update or create CLAUDE.md to reflect any new patterns, file organization,",
-        "  naming conventions, dependency choices, or build/test commands visible in the diff",
-        "- PRESERVE existing sections that are still accurate — do NOT overwrite unrelated content",
-        "- If CLAUDE.md exists and nothing in the diff warrants an update, make NO changes",
-        "- Keep the file concise and actionable — this is a reference for AI agents, not full docs",
-        "- Use markdown with clear section headings",
-        "- Only edit the file CLAUDE.md in the repository root — do NOT touch any other files",
-        "- Do NOT run tests or any commands other than reading files",
-    ])
-
-    return "\n".join(parts)
+    md_content = existing_claude_md or "(No CLAUDE.md exists yet. Create one from scratch.)"
+    return load("update_claude_md").format(
+        existing_claude_md=md_content,
+        truncated_diff=truncated_diff,
+    )
 
 
 def invoke_agent(

@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 
+from autocoder.prompts import load
 from autocoder.types import ReviewFinding, ReviewResult
 
 
@@ -14,7 +15,7 @@ REVIEW_DIFF_MAX = 50_000
 def review_pr_diff(diff: str, repo_path: str, model: str = "sonnet") -> ReviewResult:
     """Run a code review on the given diff via claude -p."""
     truncated = diff[:REVIEW_DIFF_MAX] if len(diff) > REVIEW_DIFF_MAX else diff
-    prompt = _REVIEW_TEMPLATE.format(diff=truncated)
+    prompt = load("review").format(diff=truncated)
 
     result = subprocess.run(
         ["claude", "-p", "--model", model, "--output-format", "text"],
@@ -72,38 +73,4 @@ def build_fix_prompt(findings: list[ReviewFinding]) -> str:
         f"- [{f.severity.upper()}] {f.file}: {f.description}"
         for f in findings
     )
-    return (
-        "A code review found the following issues in the current changes. "
-        "Fix each one:\n\n"
-        f"{issues_text}\n\n"
-        "Instructions:\n"
-        "- Fix ONLY the listed issues, do not refactor unrelated code\n"
-        "- Keep changes minimal\n"
-        "- Run tests after making changes to verify nothing is broken\n"
-        "- Do NOT modify existing test assertions\n"
-    )
-
-
-_REVIEW_TEMPLATE = """\
-You are a code reviewer for an automated PR. Review the following git diff for critical and medium severity issues only.
-
-Focus on:
-- Bugs: logic errors, off-by-one, null/undefined access, race conditions
-- Security: injection, exposed secrets, unsafe deserialization, path traversal
-- Data loss: missing error handling that could corrupt state
-- API contract: breaking changes to public interfaces
-
-Do NOT report:
-- Style/formatting issues
-- Minor naming suggestions
-- "Consider using X" recommendations
-- Low severity or informational findings
-
-Git diff:
-```
-{diff}
-```
-
-Respond with ONLY a JSON array. No markdown fences. No explanation.
-Each finding: {{"severity": "critical"|"medium", "file": "path/to/file", "description": "Brief actionable description"}}
-If no critical or medium issues found, respond with: []"""
+    return load("review_fix").format(issues_text=issues_text)

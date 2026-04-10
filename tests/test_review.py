@@ -1,6 +1,7 @@
 import json
 
-from autocoder.review import parse_review_response, build_fix_prompt, _REVIEW_TEMPLATE
+from autocoder.prompts import load
+from autocoder.review import parse_review_response, build_fix_prompt
 from autocoder.types import ReviewFinding
 
 
@@ -59,5 +60,6 @@ def test_build_fix_prompt():
 
 
 def test_review_template_has_placeholders():
-    assert "{diff}" in _REVIEW_TEMPLATE
-    assert "critical" in _REVIEW_TEMPLATE.lower()
+    template = load("review")
+    assert "{diff}" in template
+    assert "critical" in template.lower()
