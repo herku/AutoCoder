@@ -8,6 +8,9 @@ from autocoder.issues import (
     _dependency_reorder,
     _build_prioritize_prompt,
     _parse_priority_response,
+    _cache_key,
+    _load_cache,
+    _save_cache,
     analyze_and_prioritize,
     truncate_body,
 )
@@ -175,7 +178,7 @@ def test_parse_priority_response_unknown_issue_number():
 
 
 @patch("autocoder.issues.subprocess.run")
-def test_analyze_and_prioritize(mock_run):
+def test_analyze_and_prioritize(mock_run, tmp_path):
     issues = _make_issues()
     mock_run.return_value = MagicMock(
         stdout=json.dumps([
@@ -185,7 +188,7 @@ def test_analyze_and_prioritize(mock_run):
         ]),
         returncode=0,
     )
-    result, reasons, deps = analyze_and_prioritize(issues, "/tmp/repo", "sonnet")
+    result, reasons, deps = analyze_and_prioritize(issues, str(tmp_path), "sonnet")
     assert result[0].number == 1
     assert result[0].priority == Priority.P0
     assert result[1].number == 3
@@ -196,7 +199,7 @@ def test_analyze_and_prioritize(mock_run):
 
 
 @patch("autocoder.issues.subprocess.run")
-def test_analyze_and_prioritize_with_dependencies(mock_run):
+def test_analyze_and_prioritize_with_dependencies(mock_run, tmp_path):
     issues = _make_issues()
     mock_run.return_value = MagicMock(
         stdout=json.dumps([
@@ -206,7 +209,7 @@ def test_analyze_and_prioritize_with_dependencies(mock_run):
         ]),
         returncode=0,
     )
-    result, reasons, deps = analyze_and_prioritize(issues, "/tmp/repo", "sonnet")
+    result, reasons, deps = analyze_and_prioritize(issues, str(tmp_path), "sonnet")
     # #3 must come before #1 despite #1 being P0
     nums = [r.number for r in result]
     assert nums.index(3) < nums.index(1)
@@ -214,17 +217,17 @@ def test_analyze_and_prioritize_with_dependencies(mock_run):
 
 
 @patch("autocoder.issues.subprocess.run")
-def test_analyze_and_prioritize_fallback_on_failure(mock_run):
+def test_analyze_and_prioritize_fallback_on_failure(mock_run, tmp_path):
     issues = _make_issues()
     mock_run.return_value = MagicMock(stdout="", returncode=1)
-    result, reasons, deps = analyze_and_prioritize(issues, "/tmp/repo", "sonnet")
+    result, reasons, deps = analyze_and_prioritize(issues, str(tmp_path), "sonnet")
     assert result[0].priority == Priority.P1
     assert reasons == {}
     assert deps == {}
 
 
-def test_analyze_and_prioritize_empty():
-    result, reasons, deps = analyze_and_prioritize([], "/tmp/repo", "sonnet")
+def test_analyze_and_prioritize_empty(tmp_path):
+    result, reasons, deps = analyze_and_prioritize([], str(tmp_path), "sonnet")
     assert result == []
     assert reasons == {}
     assert deps == {}
@@ -304,3 +307,78 @@ def test_dependency_reorder_preserves_priority_among_unrelated():
     nums = [i.number for i in result]
     assert nums.index(4) < nums.index(3)
     assert nums.index(1) < nums.index(2)
+
+
+# --- Prioritization cache ---
+
+
+def test_cache_key_deterministic():
+    a = [Issue(3, "C", "", [], Priority.P0, ""), Issue(1, "A", "", [], Priority.P1, "")]
+    b = [Issue(1, "A", "", [], Priority.P1, ""), Issue(3, "C", "", [], Priority.P0, "")]
+    assert _cache_key(a) == _cache_key(b)
+
+
+def test_cache_key_changes_with_different_issues():
+    a = [Issue(1, "A", "", [], Priority.P0, "")]
+    b = [Issue(2, "B", "", [], Priority.P0, "")]
+    assert _cache_key(a) != _cache_key(b)
+
+
+def test_save_load_roundtrip(tmp_path):
+    issues = _make_issues()
+    priorities = {1: Priority.P0, 2: Priority.P3, 3: Priority.P1}
+    reasons = {1: "Simple", 2: "Complex", 3: "Medium"}
+    deps = {2: [1, 3]}
+    _save_cache(str(tmp_path), issues, priorities, reasons, deps)
+    result = _load_cache(str(tmp_path), issues)
+    assert result is not None
+    loaded_pri, loaded_reasons, loaded_deps = result
+    assert loaded_pri == priorities
+    assert loaded_reasons == reasons
+    assert loaded_deps == deps
+
+
+def test_load_cache_miss_different_issues(tmp_path):
+    issues_a = [Issue(1, "A", "", [], Priority.P0, ""), Issue(2, "B", "", [], Priority.P1, "")]
+    issues_b = [Issue(1, "A", "", [], Priority.P0, ""), Issue(4, "D", "", [], Priority.P1, "")]
+    _save_cache(str(tmp_path), issues_a, {1: Priority.P0, 2: Priority.P1}, {}, {})
+    assert _load_cache(str(tmp_path), issues_b) is None
+
+
+def test_load_cache_missing_file(tmp_path):
+    issues = _make_issues()
+    assert _load_cache(str(tmp_path), issues) is None
+
+
+@patch("autocoder.issues.subprocess.run")
+def test_analyze_uses_cache(mock_run, tmp_path):
+    issues = _make_issues()
+    mock_run.return_value = MagicMock(
+        stdout=json.dumps([
+            {"number": 1, "priority": "P0", "reason": "Typo", "blocked_by": []},
+            {"number": 2, "priority": "P3", "reason": "Rewrite", "blocked_by": []},
+            {"number": 3, "priority": "P1", "reason": "Test", "blocked_by": []},
+        ]),
+        returncode=0,
+    )
+    analyze_and_prioritize(_make_issues(), str(tmp_path), "sonnet")
+    assert mock_run.call_count == 1
+    # Second call with same issues should use cache
+    analyze_and_prioritize(_make_issues(), str(tmp_path), "sonnet")
+    assert mock_run.call_count == 1
+
+
+@patch("autocoder.issues.subprocess.run")
+def test_force_bypasses_cache(mock_run, tmp_path):
+    mock_run.return_value = MagicMock(
+        stdout=json.dumps([
+            {"number": 1, "priority": "P0", "reason": "Typo", "blocked_by": []},
+            {"number": 2, "priority": "P3", "reason": "Rewrite", "blocked_by": []},
+            {"number": 3, "priority": "P1", "reason": "Test", "blocked_by": []},
+        ]),
+        returncode=0,
+    )
+    analyze_and_prioritize(_make_issues(), str(tmp_path), "sonnet")
+    assert mock_run.call_count == 1
+    analyze_and_prioritize(_make_issues(), str(tmp_path), "sonnet", force=True)
+    assert mock_run.call_count == 2

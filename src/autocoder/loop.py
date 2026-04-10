@@ -142,7 +142,9 @@ def run(cfg: RunConfig) -> None:
         if cfg.auto_prioritize:
             print(f"Analyzing {len(issues)} issues for AI auto-prioritization...")
             with StepTimer("prioritize", timings):
-                issues, reasons, dependencies = analyze_and_prioritize(issues, cfg.repo_path, cfg.triage_model)
+                issues, reasons, dependencies = analyze_and_prioritize(
+                    issues, cfg.repo_path, cfg.triage_model, force=cfg.force_prioritize,
+                )
             log.log_prioritization(issues, reasons, dependencies)
             parts = []
             for i in issues:

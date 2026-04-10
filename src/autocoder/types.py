@@ -80,6 +80,7 @@ class RunConfig:
     plan_mode: bool
     issue_numbers: list[int] = field(default_factory=list)
     update_claude_md: bool = True
+    force_prioritize: bool = False
 
 
 @dataclass

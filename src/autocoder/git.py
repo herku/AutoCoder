@@ -37,7 +37,7 @@ def _slugify(title: str, max_len: int = 40) -> str:
 class GitOps:
     def __init__(self, repo_path: str):
         self.repo_path = repo_path
-        self._lockfile = Path(repo_path) / ".autocoder.lock"
+        self._lockfile = Path(repo_path) / ".autocoder" / ".autocoder.lock"
         self._lock_held = False
 
     def _run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -56,6 +56,7 @@ class GitOps:
                 f"Another AutoCoder instance is running (PID {pid}). "
                 f"Remove {self._lockfile} if this is stale."
             )
+        self._lockfile.parent.mkdir(parents=True, exist_ok=True)
         self._lockfile.write_text(str(os.getpid()))
         self._lock_held = True
         atexit.register(self.release_lock)
@@ -67,10 +68,10 @@ class GitOps:
 
     def assert_clean(self) -> None:
         result = self._run("status", "--porcelain")
-        # Filter out .autocoder.lock (ours) from dirty check
+        # Filter out .autocoder/ directory (lock file, cache) from dirty check
         dirty = [
             line for line in result.stdout.strip().split("\n")
-            if line.strip() and ".autocoder.lock" not in line
+            if line.strip() and ".autocoder/" not in line
         ]
         if dirty:
             raise SystemExit(

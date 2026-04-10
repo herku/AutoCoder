@@ -7,6 +7,6 @@ build/
 .pytest_cache/
 *.jsonl
 logs/
-.autocoder.lock
+.autocoder/
 .claude-home/
 .DS_Store

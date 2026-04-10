@@ -26,6 +26,7 @@ from autocoder.loop import run
 @click.option("--log-dir", default="./logs", help="Directory for JSONL log files")
 @click.option("--dry-run", is_flag=True, default=False, help="Fetch issues and show plan without executing")
 @click.option("--auto-prioritize/--no-auto-prioritize", default=True, help="Use AI to analyze and prioritize issues by automability")
+@click.option("--force-prioritize", is_flag=True, default=False, help="Bypass prioritization cache and re-run AI analysis")
 @click.option("--max-retries", default=3, type=int, help="Max retry attempts per issue")
 @click.option("--protect-tests", is_flag=True, default=False, help="Prevent agent from modifying test files")
 @click.option("--auto-merge", is_flag=True, default=False, help="Auto-review, fix, and squash-merge PRs after creation")

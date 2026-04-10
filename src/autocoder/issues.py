@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import heapq
 import json
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 from autocoder.prompts import load
 from autocoder.types import Issue, Priority
@@ -177,6 +179,66 @@ def _dependency_reorder(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Prioritization cache
+# ---------------------------------------------------------------------------
+
+_CACHE_DIR = ".autocoder"
+_CACHE_FILE = "prioritization_cache.json"
+
+
+def _cache_key(issues: list[Issue]) -> str:
+    """Compute cache key from sorted issue numbers."""
+    nums = sorted(iss.number for iss in issues)
+    raw = ",".join(str(n) for n in nums)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _load_cache(
+    repo_path: str, issues: list[Issue],
+) -> tuple[dict[int, Priority], dict[int, str], dict[int, list[int]]] | None:
+    """Load cached prioritization if the issue set matches."""
+    cache_path = Path(repo_path) / _CACHE_DIR / _CACHE_FILE
+    if not cache_path.exists():
+        return None
+    try:
+        data = json.loads(cache_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    if data.get("key") != _cache_key(issues):
+        return None
+    try:
+        priorities = {int(k): Priority(v) for k, v in data["priorities"].items()}
+        reasons = {int(k): v for k, v in data["reasons"].items()}
+        dependencies = {int(k): v for k, v in data["dependencies"].items()}
+    except (KeyError, ValueError):
+        return None
+    return priorities, reasons, dependencies
+
+
+def _save_cache(
+    repo_path: str,
+    issues: list[Issue],
+    priorities: dict[int, Priority],
+    reasons: dict[int, str],
+    dependencies: dict[int, list[int]],
+) -> None:
+    """Save prioritization results to cache."""
+    try:
+        cache_dir = Path(repo_path) / _CACHE_DIR
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / _CACHE_FILE
+        data = {
+            "key": _cache_key(issues),
+            "priorities": {str(k): v.value for k, v in priorities.items()},
+            "reasons": {str(k): v for k, v in reasons.items()},
+            "dependencies": {str(k): v for k, v in dependencies.items()},
+        }
+        cache_path.write_text(json.dumps(data, indent=2) + "\n")
+    except OSError:
+        pass
+
+
 def truncate_body(body: str, max_chars: int = ISSUE_BODY_MAX_CHARS) -> str:
     """Truncate body preserving paragraph boundaries."""
     if len(body) <= max_chars:
@@ -201,10 +263,23 @@ def analyze_and_prioritize(
     issues: list[Issue],
     repo_path: str,
     triage_model: str = "sonnet",
+    force: bool = False,
 ) -> tuple[list[Issue], dict[int, str], dict[int, list[int]]]:
     """Send all issues to Claude for AI-based priority scoring."""
     if not issues:
         return issues, {}, {}
+
+    if not force:
+        cached = _load_cache(repo_path, issues)
+        if cached is not None:
+            priorities, reasons, dependencies = cached
+            for issue in issues:
+                if issue.number in priorities:
+                    issue.priority = priorities[issue.number]
+            sorted_issues = _priority_sort(issues)
+            sorted_issues = _dependency_reorder(sorted_issues, dependencies)
+            print("  Using cached prioritization results.")
+            return sorted_issues, reasons, dependencies
 
     prompt = _build_prioritize_prompt(issues)
 
@@ -233,6 +308,7 @@ def analyze_and_prioritize(
 
     sorted_issues = _priority_sort(issues)
     sorted_issues = _dependency_reorder(sorted_issues, dependencies)
+    _save_cache(repo_path, issues, priorities, reasons, dependencies)
     return sorted_issues, reasons, dependencies
 
 
