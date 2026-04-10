@@ -23,6 +23,8 @@ from autocoder.loop import run
 @click.option("--token-budget", default=500_000, type=int, help="Token budget per issue")
 @click.option("--daily-cap", default=5_000_000, type=int, help="Daily token cap across all issues")
 @click.option("--docker", is_flag=True, default=False, help="Run agent inside Docker sandbox")
+@click.option("--update-docker", is_flag=True, default=False, help="Force-rebuild Docker image with latest Claude Code")
+@click.option("--docker-max-age-days", default=7, type=int, help="Auto-rebuild Docker image if older than N days (default: 7)")
 @click.option("--log-dir", default="./logs", help="Directory for JSONL log files")
 @click.option("--dry-run", is_flag=True, default=False, help="Fetch issues and show plan without executing")
 @click.option("--auto-prioritize/--no-auto-prioritize", default=True, help="Use AI to analyze and prioritize issues by automability")

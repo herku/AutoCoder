@@ -81,6 +81,8 @@ class RunConfig:
     issue_numbers: list[int] = field(default_factory=list)
     update_claude_md: bool = True
     force_prioritize: bool = False
+    update_docker: bool = False
+    docker_max_age_days: int = 7
 
 
 @dataclass
