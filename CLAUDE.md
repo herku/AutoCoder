@@ -16,11 +16,11 @@ Requires: Claude Code CLI + GitHub CLI, both authenticated.
 
 ```
 cli.py          Click entry point, all CLI options
-config.py       RunConfig dataclass built once at startup
+config.py       RunConfig dataclass built once at startup; Docker image age checks
 loop.py         Main orchestration: fetch → prioritize → process issues
 agent.py        Invokes Claude Code CLI subprocess, parses JSON, detects rate-limit/auth errors
 sandbox.py      SandboxConfig: scoped allowed tools for Claude agent
-issues.py       GitHub CLI wrapper: fetch/parse issues, extract acceptance criteria
+issues.py       GitHub CLI wrapper: fetch/parse issues, extract acceptance criteria, priority caching
 review.py       Code review phase on PR diffs
 testplan.py     Acceptance criteria verification against diff
 verify.py       Runs lint/unit/integration tests (stops on first failure)
@@ -28,7 +28,9 @@ budget.py       Token & cost tracking (per-issue + daily cap)
 git.py          GitOps class: branching, commit, diff, rollback, merge, lockfile
 anticheat.py    Protect-tests mode: read-only test files, audit violations
 logger.py       JSONL logging + dead-letter queue for failures
-types.py        Dataclasses: Issue, AgentResult, VerifyResult, RunConfig, exceptions
+telemetry.py    Per-phase cost/token tracking and failure categorization
+epic.py         Epic/meta-issue support: process sub-issues, track progress, close parent
+types.py        Dataclasses: Issue, AgentResult, VerifyResult, RunConfig, EpicResult, exceptions
 prompts/        Markdown templates loaded via prompts.load(name)
 ```
 
@@ -59,13 +61,17 @@ Templates live in `src/autocoder/prompts/*.md`, loaded via `prompts.load(name)`.
 
 ## Key CLI Options
 
-`--model` (default `claude-sonnet-4-6`), `--plan-model`, `--review-model`, `--implement-model` for per-phase model selection. `--effort`, `--max-issues`, `--token-budget`, `--daily-cap`, `--auto-merge`, `--docker`, `--protect-tests`, `--dry-run`, `--issue` (single issue mode), `--update-claude-md`.
+`--model` (default `claude-sonnet-4-6`), `--plan-model`, `--review-model`, `--implement-model` for per-phase model selection. `--effort`, `--max-issues`, `--token-budget`, `--daily-cap`, `--auto-merge`, `--docker`, `--update-docker`, `--docker-max-age-days` (default 7), `--protect-tests`, `--dry-run`, `--issue` (single issue mode), `--update-claude-md`.
 
 ## Key Patterns
 
 - **Config**: single `RunConfig` passed through entire pipeline
 - **Sandbox**: `SandboxConfig` restricts Claude's allowed tools (Read/Edit/Write/Glob/Grep always; git/test/lint optional)
 - **Cost control**: per-issue `--max-budget-usd` via Claude CLI, daily cap stops processing
+- **Epics**: meta-issues with sub-issue lists are auto-expanded; sub-issues processed individually, parent closed when all succeed
+- **Telemetry**: per-phase cost/token tracking, failure categorization (lint/test/review/rate-limit/etc.)
+- **Priority caching**: previously triaged issues skip redundant AI prioritization
+- **Docker freshness**: images auto-rebuild after `--docker-max-age-days` (default 7); `--update-docker` forces immediate rebuild with `--no-cache`
 - **Error detection**: rate-limit and auth-error pattern matching aborts immediately
 - **Logging**: `logs/` directory, JSONL records per run, `failed_issues.jsonl` dead-letter queue
 

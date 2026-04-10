@@ -71,6 +71,8 @@ uv run autocoder --repo /path/to/repo --max-issues 1
 | `--auto-prioritize` | on | AI-based issue prioritization (disable with `--no-auto-prioritize`) |
 | `--auto-merge` | off | Review, fix, and squash-merge PRs after creation |
 | `--docker` | off | Run agent inside Docker sandbox |
+| `--update-docker` | off | Force-rebuild Docker image with latest Claude Code |
+| `--docker-max-age-days` | `7` | Auto-rebuild Docker image if older than N days |
 | `--protect-tests` | off | Prevent agent from modifying test files |
 | `--log-dir` | `./logs` | Directory for JSONL logs |
 | `--dry-run` | off | Show plan without executing |
@@ -108,6 +110,8 @@ If the fix breaks tests, the original PR is merged as-is. If merge fails (e.g. b
 **Default:** Agent permissions scoped via `--allowedTools` — only file operations, git, and your specified test/lint commands.
 
 **Docker mode (`--docker`):** Runs the agent inside a container. Requires `ANTHROPIC_API_KEY` or OAuth tokens extracted from macOS keychain. The image auto-builds on first use.
+
+**Keeping the image fresh:** The Docker image bakes in Claude Code CLI at build time. By default, images older than 7 days are automatically rebuilt (configurable via `--docker-max-age-days`). Use `--update-docker` to force an immediate rebuild. All rebuilds use `--no-cache` to guarantee the latest CLI version.
 
 ## Anti-cheat
 
