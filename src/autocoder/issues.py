@@ -108,6 +108,62 @@ def _parse_issue(raw: dict, default_priority: str) -> Issue:
     )
 
 
+def parse_sub_issues(body: str) -> list[int]:
+    """Extract issue numbers referenced in the epic body.
+
+    Matches:
+      - [ ] #123 description
+      - [x] #123 description
+      - #123 description (bare list item)
+      - [ ] https://github.com/org/repo/issues/123
+    """
+    if not body:
+        return []
+    # Checkbox items: - [ ] #N or - [x] #N (with optional URL form)
+    checkbox_pat = re.compile(
+        r"^[-*]\s*\[[ xX]\]\s*(?:https?://github\.com/[^/]+/[^/]+/issues/)?#?(\d+)",
+        re.MULTILINE,
+    )
+    # Bare list items: - #N
+    bare_pat = re.compile(r"^[-*]\s+#(\d+)", re.MULTILINE)
+
+    seen: set[int] = set()
+    result: list[int] = []
+    for pat in (checkbox_pat, bare_pat):
+        for m in pat.finditer(body):
+            num = int(m.group(1))
+            if num not in seen:
+                seen.add(num)
+                result.append(num)
+    return result
+
+
+def fetch_sub_issues(repo_path: str, numbers: list[int]) -> tuple[list[Issue], list[int]]:
+    """Fetch sub-issues, returning (open_issues, closed_numbers)."""
+    open_issues: list[Issue] = []
+    closed: list[int] = []
+    for num in numbers:
+        result = subprocess.run(
+            [
+                "gh", "issue", "view", str(num),
+                "--json", "number,title,body,labels,url,state",
+            ],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            print(f"  Warning: could not fetch sub-issue #{num}: {result.stderr.strip()}", file=sys.stderr)
+            continue
+        raw = json.loads(result.stdout)
+        if raw.get("state", "").upper() == "CLOSED":
+            closed.append(num)
+        else:
+            open_issues.append(_parse_issue(raw, ""))
+    return open_issues, closed
+
+
 def _extract_priority(labels: list[str], default: str) -> Priority:
     for p in PRIORITY_ORDER:
         if p.value in labels:

@@ -11,6 +11,7 @@ Scoring criteria (weight each equally):
 2. COMPLEXITY: Lines of code likely needed. Fewer = higher priority.
 3. DEPENDENCIES: Does it depend on other issues in this batch? If yes, the dependency should be higher priority.
 4. EXISTING LABELS: If the issue already has a priority label, treat it as a strong hint (but you may override if analysis disagrees).
+5. EPIC ISSUES: If an issue has label "epic", "meta", or "tracking", assign P3 — these are meta-issues that group sub-issues and are processed separately.
 
 Issues:
 ---

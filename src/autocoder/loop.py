@@ -16,7 +16,8 @@ from autocoder.agent import (
 from autocoder.anticheat import audit_diff, protect_test_files, restore_test_files
 from autocoder.budget import BudgetTracker
 from autocoder.git import GitOps
-from autocoder.issues import analyze_and_prioritize, fetch_issues, fetch_issues_by_number
+from autocoder.epic import process_epic
+from autocoder.issues import analyze_and_prioritize, fetch_issues, fetch_issues_by_number, parse_sub_issues
 from autocoder.logger import RunLogger
 from autocoder.pr import comment_failure, create_pr, label_failed, mark_ready, merge_pr
 from autocoder.review import build_fix_prompt, review_pr_diff
@@ -36,6 +37,7 @@ from autocoder.types import (
     TestPlanResult,
     VerificationError,
     commit_prefix,
+    is_epic,
 )
 from autocoder.verify import format_failure, run_verification
 
@@ -155,23 +157,57 @@ def run(cfg: RunConfig) -> None:
                 parts.append(label)
             print(f"Priority order: {', '.join(parts)}\n")
 
+        # Partition epics vs regular issues
+        epic_issues = [i for i in issues if is_epic(i)]
+        regular_issues = [i for i in issues if not is_epic(i)]
+
         if cfg.dry_run:
             log.log_dry_run(issues, reasons=reasons if reasons else None, dependencies=dependencies if dependencies else None)
+            for epic in epic_issues:
+                sub_nums = parse_sub_issues(epic.body)
+                print(f"  Epic #{epic.number}: {epic.title} ({len(sub_nums)} sub-issues: {', '.join(f'#{n}' for n in sub_nums)})")
             return
 
-        # Truncate to max_issues for processing
-        issues = issues[:cfg.max_issues]
-        print(f"Processing top {len(issues)} issues.\n")
+        # Truncate regular issues to max_issues for processing
+        regular_issues = regular_issues[:cfg.max_issues]
+        print(f"Processing {len(regular_issues)} regular issues + {len(epic_issues)} epics.\n")
 
-        for i, issue in enumerate(issues, 1):
+        # Process regular issues first (may include epic sub-issues)
+        for i, issue in enumerate(regular_issues, 1):
             if budget.daily_exhausted():
                 log.log_event("daily_cap_reached", **budget.summary())
                 print("Daily token cap reached. Stopping.")
                 break
 
-            print(f"[{i}/{len(issues)}] Processing #{issue.number}: {issue.title}")
+            print(f"[{i}/{len(regular_issues)}] Processing #{issue.number}: {issue.title}")
             try:
-                _process_issue(issue, cfg, git, budget, log, timings)
+                process_issue(issue, cfg, git, budget, log, timings)
+            except RateLimitError as e:
+                log.log_event("rate_limited", error=str(e))
+                print(f"  Rate limit hit: {str(e)[:200]}")
+                print("  Stopping — retrying won't help until limit resets.")
+                break
+            except AuthenticationError as e:
+                log.log_event("auth_failed", error=str(e))
+                print(f"  Authentication failed: {str(e)[:200]}")
+                print("  Stopping — token expired or invalid. Re-authenticate and retry.")
+                break
+
+        # Process epics (sub-issues implemented, then epic closed)
+        for i, epic in enumerate(epic_issues, 1):
+            if budget.daily_exhausted():
+                log.log_event("daily_cap_reached", **budget.summary())
+                print("Daily token cap reached. Stopping.")
+                break
+
+            print(f"[Epic {i}/{len(epic_issues)}] Processing #{epic.number}: {epic.title}")
+            try:
+                result = process_epic(epic, cfg, git, budget, log, timings)
+                log.log_event(
+                    "epic_processed", epic_number=epic.number,
+                    succeeded=result.succeeded, failed=result.failed,
+                    skipped_closed=result.skipped_closed, all_complete=result.all_complete,
+                )
             except RateLimitError as e:
                 log.log_event("rate_limited", error=str(e))
                 print(f"  Rate limit hit: {str(e)[:200]}")
@@ -191,7 +227,7 @@ def run(cfg: RunConfig) -> None:
         git.release_lock()
 
 
-def _process_issue(
+def process_issue(
     issue, cfg: RunConfig, git: GitOps, budget: BudgetTracker, log: RunLogger,
     timings: StepTimings,
 ) -> None:

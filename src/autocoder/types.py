@@ -140,7 +140,18 @@ class LockError(Exception):
     pass
 
 
+@dataclass
+class EpicResult:
+    epic_number: int
+    sub_issues: list[int]
+    succeeded: list[int]
+    failed: list[int]
+    skipped_closed: list[int]
+    all_complete: bool
+
+
 _BUG_LABELS = {"bug", "bugfix", "defect", "regression", "error", "crash"}
+_EPIC_LABELS = {"epic", "meta", "tracking"}
 
 
 def commit_prefix(issue: Issue) -> str:
@@ -157,3 +168,9 @@ def action_verb(issue: Issue) -> str:
     if lower_labels & _BUG_LABELS:
         return "Fix"
     return "Implement"
+
+
+def is_epic(issue: Issue) -> bool:
+    """Return True if the issue is an epic/meta/tracking issue."""
+    lower_labels = {label.lower() for label in issue.labels}
+    return bool(lower_labels & _EPIC_LABELS)
