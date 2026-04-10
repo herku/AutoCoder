@@ -33,6 +33,7 @@ def build_config(
     auto_merge: bool,
     issues: tuple[int, ...] = (),
     plan_mode: bool = False,
+    update_claude_md: bool = True,
 ) -> RunConfig:
     repo_path = str(Path(repo).resolve())
 
@@ -106,4 +107,5 @@ def build_config(
         auto_merge=auto_merge,
         plan_mode=plan_mode,
         issue_numbers=issue_numbers,
+        update_claude_md=update_claude_md,
     )

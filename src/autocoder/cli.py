@@ -31,6 +31,7 @@ from autocoder.loop import run
 @click.option("--auto-merge", is_flag=True, default=False, help="Auto-review, fix, and squash-merge PRs after creation")
 @click.option("--issue", "issues", multiple=True, type=int, help="Specific issue number(s) to process (skips fetch and auto-prioritize)")
 @click.option("--plan-mode", is_flag=True, default=False, help="Agent plans before implementing each issue")
+@click.option("--update-claude-md/--no-update-claude-md", default=True, help="Update repo CLAUDE.md before committing")
 @click.option(
     "--test-patterns",
     default="**/test_*,**/*_test.*,**/tests/**,**/*.test.*,**/*.spec.*",

@@ -122,6 +122,48 @@ def build_implement_prompt(issue: Issue, plan_text: str, error_context: str = ""
 
 TIMEOUT_PLAN = 3600  # 60 minutes for plan phase (read-only analysis)
 TIMEOUT_IMPLEMENT = 6000  # 100 minutes for implementation phase
+TIMEOUT_CLAUDE_MD = 600  # 10 minutes for CLAUDE.md update
+BUDGET_CLAUDE_MD = 2.00  # $2.00 max for doc update
+
+CLAUDE_MD_DIFF_MAX = 30_000
+
+
+def build_update_claude_md_prompt(diff: str, existing_claude_md: str | None) -> str:
+    """Build a prompt for updating the repo's CLAUDE.md with architecture info."""
+    truncated_diff = diff[:CLAUDE_MD_DIFF_MAX] if len(diff) > CLAUDE_MD_DIFF_MAX else diff
+
+    parts = [
+        "You are updating CLAUDE.md — a project memory file that documents architecture,",
+        "conventions, and patterns for future AI coding sessions.",
+        "",
+        "## Current CLAUDE.md",
+    ]
+
+    if existing_claude_md:
+        parts.append(existing_claude_md)
+    else:
+        parts.append("(No CLAUDE.md exists yet. Create one from scratch.)")
+
+    parts.extend([
+        "",
+        "## Recent Changes (git diff)",
+        "```",
+        truncated_diff,
+        "```",
+        "",
+        "## Instructions",
+        "- Analyze the diff for architectural patterns, conventions, and structural decisions",
+        "- Update or create CLAUDE.md to reflect any new patterns, file organization,",
+        "  naming conventions, dependency choices, or build/test commands visible in the diff",
+        "- PRESERVE existing sections that are still accurate — do NOT overwrite unrelated content",
+        "- If CLAUDE.md exists and nothing in the diff warrants an update, make NO changes",
+        "- Keep the file concise and actionable — this is a reference for AI agents, not full docs",
+        "- Use markdown with clear section headings",
+        "- Only edit the file CLAUDE.md in the repository root — do NOT touch any other files",
+        "- Do NOT run tests or any commands other than reading files",
+    ])
+
+    return "\n".join(parts)
 
 
 def invoke_agent(

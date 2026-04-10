@@ -63,6 +63,20 @@ def build_plan_sandbox(cfg: RunConfig) -> SandboxConfig:
     return SandboxConfig(allowed_tools=tools, docker=cfg.docker)
 
 
+def build_claude_md_sandbox(cfg: RunConfig) -> SandboxConfig:
+    """Build a tightly scoped sandbox for CLAUDE.md updates."""
+    tools: list[str] = [
+        "Read",
+        "Edit",
+        "Write",
+        "Glob",
+        "Grep",
+        "Bash(git diff:*)",
+        "Bash(git status:*)",
+    ]
+    return SandboxConfig(allowed_tools=tools, docker=cfg.docker)
+
+
 def build_claude_cmd(
     model: str,
     effort: str,

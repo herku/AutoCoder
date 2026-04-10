@@ -5,7 +5,14 @@ import sys
 import time
 from dataclasses import dataclass
 
-from autocoder.agent import build_prompt, build_plan_prompt, build_implement_prompt, invoke_agent, TIMEOUT_PLAN, TIMEOUT_IMPLEMENT
+from pathlib import Path
+
+from autocoder.agent import (
+    build_prompt, build_plan_prompt, build_implement_prompt,
+    build_update_claude_md_prompt,
+    invoke_agent, TIMEOUT_PLAN, TIMEOUT_IMPLEMENT,
+    TIMEOUT_CLAUDE_MD, BUDGET_CLAUDE_MD,
+)
 from autocoder.anticheat import audit_diff, protect_test_files, restore_test_files
 from autocoder.budget import BudgetTracker
 from autocoder.git import GitOps
@@ -13,7 +20,7 @@ from autocoder.issues import analyze_and_prioritize, fetch_issues, fetch_issues_
 from autocoder.logger import RunLogger
 from autocoder.pr import comment_failure, create_pr, label_failed, mark_ready, merge_pr
 from autocoder.review import build_fix_prompt, review_pr_diff
-from autocoder.sandbox import SandboxConfig, build_sandbox, build_plan_sandbox
+from autocoder.sandbox import SandboxConfig, build_sandbox, build_plan_sandbox, build_claude_md_sandbox
 from autocoder.testplan import (
     build_test_plan_fix_prompt,
     extract_acceptance_criteria,
@@ -296,6 +303,29 @@ def _process_issue(
                         test_plan = verify_test_plan(issue, git.diff_full(), cfg.repo_path, cfg.model)
                 else:
                     print(f"  Test plan: all criteria met.")
+
+            # Stage 4.9: Update CLAUDE.md
+            if cfg.update_claude_md:
+                try:
+                    print(f"  Updating CLAUDE.md...")
+                    with StepTimer(f"update_claude_md {tag}", timings):
+                        claude_md_path = Path(cfg.repo_path) / "CLAUDE.md"
+                        existing_content = claude_md_path.read_text() if claude_md_path.exists() else None
+                        diff_for_md = git.diff_full()
+                        md_prompt = build_update_claude_md_prompt(diff_for_md, existing_content)
+                        md_sandbox = build_claude_md_sandbox(cfg)
+                        md_budget = min(BUDGET_CLAUDE_MD, budget.remaining_for_issue_usd(cfg.model))
+                        md_result = invoke_agent(
+                            md_prompt, cfg.repo_path, cfg.model, cfg.effort,
+                            md_budget, md_sandbox, timeout=TIMEOUT_CLAUDE_MD,
+                        )
+                    budget.record(md_result)
+                    if md_result.is_error:
+                        print(f"  CLAUDE.md update failed (agent error), skipping.")
+                    else:
+                        print(f"  CLAUDE.md updated.")
+                except Exception as e:
+                    print(f"  CLAUDE.md update failed: {str(e)[:100]}, skipping.")
 
             # Stage 5: Commit and PR
             with StepTimer(f"commit_pr {tag}", timings):
