@@ -8,6 +8,11 @@ from typing import Optional
 
 from autocoder.types import AgentResult, Issue, Outcome, VerifyResult
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from autocoder.telemetry import IssueTelemetry, Telemetry
+
 
 class RunLogger:
     def __init__(self, log_dir: str):
@@ -27,6 +32,7 @@ class RunLogger:
         pr_url: Optional[str] = None,
         diff_stats: str = "",
         error: Optional[str] = None,
+        telemetry: Optional[IssueTelemetry] = None,
     ) -> None:
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -50,6 +56,9 @@ class RunLogger:
             "pr_url": pr_url,
             "error": error,
         }
+        if telemetry is not None:
+            from autocoder.telemetry import Telemetry
+            record.update(Telemetry.to_jsonl_dict(telemetry))
         self._append(self._log_path, record)
         self._attempts.append(record)
 
@@ -125,25 +134,37 @@ class RunLogger:
             },
         )
 
-    def write_summary(self) -> None:
-        successes = [a for a in self._attempts if a["outcome"] == "success"]
-        retries = [a for a in self._attempts if a["outcome"] == "retry"]
-        skips = [a for a in self._attempts if a["outcome"] == "skip"]
-        total_cost = sum(a["cost_usd"] for a in self._attempts)
-        total_tokens = sum(a["tokens_in"] + a["tokens_out"] for a in self._attempts)
+    def log_run_summary(self, telem: Telemetry) -> None:
+        from autocoder.telemetry import Telemetry as _T  # noqa: runtime import
+        summary = telem.run_summary()
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": self._run_id,
+            "event": "run_summary",
+            "issues_processed": summary.issues_processed,
+            "success_count": summary.success_count,
+            "retry_count": summary.retry_count,
+            "skip_count": summary.skip_count,
+            "total_cost_usd": round(summary.total_cost_usd, 6),
+            "phase_cost_breakdown": summary.phase_cost_breakdown,
+            "phase_token_breakdown": summary.phase_token_breakdown,
+            "per_model_cost": summary.per_model_cost,
+            "overall_cache_hit_rate": round(summary.overall_cache_hit_rate, 4),
+            "top_failure_reasons": summary.top_failure_reasons,
+        }
+        self._append(self._log_path, record)
 
-        print(f"\n{'=' * 50}")
-        print(f"AutoCoder Run Summary ({self._run_id})")
-        print(f"{'=' * 50}")
-        print(f"  PRs created:  {len(successes)}")
-        print(f"  Retries:      {len(retries)}")
-        print(f"  Skipped:      {len(skips)}")
-        print(f"  Total cost:   ${total_cost:.4f}")
-        print(f"  Total tokens: {total_tokens:,}")
-        print(f"  Log file:     {self._log_path}")
-        if skips:
-            print(f"  Dead letter:  {self._dead_letter_path}")
-        print(f"{'=' * 50}\n")
+    @property
+    def run_id(self) -> str:
+        return self._run_id
+
+    @property
+    def log_path(self) -> Path:
+        return self._log_path
+
+    @property
+    def dead_letter_path(self) -> Path:
+        return self._dead_letter_path
 
     def _append(self, path: Path, record: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

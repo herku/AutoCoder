@@ -27,6 +27,7 @@ from autocoder.testplan import (
     extract_acceptance_criteria,
     verify_test_plan,
 )
+from autocoder.telemetry import FailureCategory, Phase, Telemetry
 from autocoder.types import (
     AgentError,
     AntiCheatViolation,
@@ -113,6 +114,7 @@ def run(cfg: RunConfig) -> None:
     budget = BudgetTracker(cfg.token_budget, cfg.daily_cap)
     git = GitOps(cfg.repo_path)
     timings = StepTimings()
+    telem = Telemetry()
 
     # Startup — check clean BEFORE creating lockfile
     git.assert_clean()
@@ -181,7 +183,7 @@ def run(cfg: RunConfig) -> None:
 
             print(f"[{i}/{len(regular_issues)}] Processing #{issue.number}: {issue.title}")
             try:
-                process_issue(issue, cfg, git, budget, log, timings)
+                process_issue(issue, cfg, git, budget, log, timings, telem)
             except RateLimitError as e:
                 log.log_event("rate_limited", error=str(e))
                 print(f"  Rate limit hit: {str(e)[:200]}")
@@ -202,7 +204,7 @@ def run(cfg: RunConfig) -> None:
 
             print(f"[Epic {i}/{len(epic_issues)}] Processing #{epic.number}: {epic.title}")
             try:
-                result = process_epic(epic, cfg, git, budget, log, timings)
+                result = process_epic(epic, cfg, git, budget, log, timings, telem)
                 log.log_event(
                     "epic_processed", epic_number=epic.number,
                     succeeded=result.succeeded, failed=result.failed,
@@ -221,7 +223,8 @@ def run(cfg: RunConfig) -> None:
 
         _print_timing_summary(timings)
         log.log_timings(timings.steps)
-        log.write_summary()
+        log.log_run_summary(telem)
+        _print_run_summary(telem, log)
 
     finally:
         git.release_lock()
@@ -229,7 +232,7 @@ def run(cfg: RunConfig) -> None:
 
 def process_issue(
     issue, cfg: RunConfig, git: GitOps, budget: BudgetTracker, log: RunLogger,
-    timings: StepTimings,
+    timings: StepTimings, telem: Telemetry,
 ) -> None:
     error_context = ""
     agent_result = None
@@ -240,6 +243,7 @@ def process_issue(
     tag = f"#{issue.number}"
 
     for attempt in range(1, cfg.max_retries + 1):
+        telem.begin_issue(issue.number, attempt)
         agent_result = None
         verify_results = []
         protected_files: list[str] = []
@@ -267,6 +271,7 @@ def process_issue(
                         timeout=TIMEOUT_PLAN,
                     )
                 budget.record(plan_result)
+                telem.record_phase(Phase.PLAN, plan_result)
                 if plan_result.is_error:
                     raise AgentError(plan_result.result_text)
                 plan_text = plan_result.result_text
@@ -284,6 +289,7 @@ def process_issue(
                 max_budget = budget.remaining_for_issue_usd(cfg.model)
                 agent_result = invoke_agent(prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox)
             budget.record(agent_result)
+            telem.record_phase(Phase.IMPLEMENT, agent_result)
 
             if agent_result.is_error:
                 raise AgentError(agent_result.result_text)
@@ -302,6 +308,7 @@ def process_issue(
             print(f"  Running verification...")
             with StepTimer(f"verify {tag} {att}", timings):
                 verify_results = run_verification(cfg)
+            telem.record_verify(verify_results)
 
             if not all(v.passed for v in verify_results):
                 failed = next(v for v in verify_results if not v.passed)
@@ -316,6 +323,8 @@ def process_issue(
                 with StepTimer(f"test_plan {tag}", timings):
                     test_plan = verify_test_plan(issue, git.diff_full(), cfg.repo_path, cfg.model)
 
+                telem.record_testplan(test_plan)
+
                 if not test_plan.all_passed:
                     failed_items = [i for i in test_plan.items if i.status == "fail"]
                     print(f"  Test plan: {len(failed_items)} criteria not met. Fixing...")
@@ -329,16 +338,19 @@ def process_issue(
                             fix_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox
                         )
                     budget.record(fix_result)
+                    telem.record_phase(Phase.TESTPLAN_FIX, fix_result)
 
                     if not fix_result.is_error:
                         print(f"  Re-verifying after test plan fix...")
                         with StepTimer(f"re_verify {tag}", timings):
                             verify_results = run_verification(cfg)
+                        telem.record_verify(verify_results)
                         if not all(v.passed for v in verify_results):
                             failed = next(v for v in verify_results if not v.passed)
                             error_context = format_failure(failed)
                             raise VerificationError(failed.stage, error_context)
                         test_plan = verify_test_plan(issue, git.diff_full(), cfg.repo_path, cfg.model)
+                        telem.record_testplan(test_plan)
                 else:
                     print(f"  Test plan: all criteria met.")
 
@@ -358,6 +370,7 @@ def process_issue(
                             md_budget, md_sandbox, timeout=TIMEOUT_CLAUDE_MD,
                         )
                     budget.record(md_result)
+                    telem.record_phase(Phase.UPDATE_CLAUDE_MD, md_result)
                     if md_result.is_error:
                         print(f"  CLAUDE.md update failed (agent error), skipping.")
                     else:
@@ -384,19 +397,23 @@ def process_issue(
                 print(f"  Draft PR created: {pr_url}")
                 with StepTimer(f"review_merge {tag}", timings):
                     merge_status = _post_pr_review_and_merge(
-                        cfg, git, budget, issue, branch, pr_url, sandbox,
+                        cfg, git, budget, issue, branch, pr_url, sandbox, telem,
                     )
                 print(f"  {merge_status}\n")
             else:
                 print(f"  PR created: {pr_url}\n")
 
+            issue_telem = telem.end_issue(outcome=Outcome.SUCCESS.value)
             log.log_attempt(
                 issue, attempt, agent_result, verify_results,
                 Outcome.SUCCESS, pr_url=pr_url, diff_stats=diff_stats,
+                telemetry=issue_telem,
             )
             return
 
         except RateLimitError:
+            telem.record_failure(FailureCategory.RATE_LIMIT)
+            telem.end_issue(outcome=Outcome.SKIP.value)
             if protected_files:
                 restore_test_files(protected_files)
             git.rollback(checkpoint)
@@ -404,6 +421,15 @@ def process_issue(
             raise  # Propagate to run() to stop all processing
 
         except (AgentError, VerificationError, AntiCheatViolation, RuntimeError) as e:
+            # Classify failure for telemetry
+            if isinstance(e, VerificationError):
+                _stage_map = {"lint": FailureCategory.LINT_FAIL, "unit": FailureCategory.TEST_FAIL, "integration": FailureCategory.INTEGRATION_FAIL}
+                telem.record_failure(_stage_map.get(e.stage, FailureCategory.TEST_FAIL))
+            elif isinstance(e, AntiCheatViolation):
+                telem.record_failure(FailureCategory.ANTICHEAT_VIOLATION)
+            elif isinstance(e, AgentError):
+                telem.record_failure(FailureCategory.AGENT_ERROR)
+
             # Restore test files on failure
             if protected_files:
                 restore_test_files(protected_files)
@@ -412,18 +438,20 @@ def process_issue(
             git.checkout_main()
 
             if attempt < cfg.max_retries:
+                issue_telem = telem.end_issue(outcome=Outcome.RETRY.value)
                 log.log_attempt(
                     issue, attempt, agent_result, verify_results,
-                    Outcome.RETRY, error=str(e),
+                    Outcome.RETRY, error=str(e), telemetry=issue_telem,
                 )
                 print(f"  Attempt {attempt} failed: {str(e)[:200]}")
                 if not error_context:
                     error_context = str(e)
             else:
                 # Final failure
+                issue_telem = telem.end_issue(outcome=Outcome.SKIP.value)
                 log.log_attempt(
                     issue, attempt, agent_result, verify_results,
-                    Outcome.SKIP, error=str(e),
+                    Outcome.SKIP, error=str(e), telemetry=issue_telem,
                 )
                 log.dead_letter(issue, str(e))
                 label_failed(cfg.repo_path, issue.number)
@@ -433,6 +461,8 @@ def process_issue(
                 return
 
         except subprocess.TimeoutExpired:
+            telem.record_failure(FailureCategory.TIMEOUT)
+            issue_telem = telem.end_issue(outcome=Outcome.RETRY.value)
             if protected_files:
                 restore_test_files(protected_files)
             git.rollback(checkpoint)
@@ -440,7 +470,7 @@ def process_issue(
             error_context = "Previous attempt timed out. Use a simpler approach."
             log.log_attempt(
                 issue, attempt, agent_result, verify_results,
-                Outcome.RETRY, error="timeout",
+                Outcome.RETRY, error="timeout", telemetry=issue_telem,
             )
             print(f"  Attempt {attempt} timed out.")
 
@@ -456,6 +486,7 @@ def _post_pr_review_and_merge(
     branch: str,
     pr_url: str,
     sandbox: SandboxConfig,
+    telem: Telemetry,
 ) -> str:
     """Review PR, fix issues, and squash-merge. Returns status string."""
     try:
@@ -465,6 +496,7 @@ def _post_pr_review_and_merge(
         print("  Running code review...")
         diff = git.diff_full()
         review = review_pr_diff(diff, cfg.repo_path, cfg.review_model)
+        telem.record_review(review)
 
         if not review.has_actionable_issues:
             print("  Review: no critical/medium issues found.")
@@ -481,6 +513,7 @@ def _post_pr_review_and_merge(
         try:
             fix_result = invoke_agent(fix_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox)
             budget.record(fix_result)
+            telem.record_phase(Phase.REVIEW_FIX, fix_result)
         except RateLimitError:
             raise
         except AgentError as e:
@@ -493,6 +526,7 @@ def _post_pr_review_and_merge(
         # Re-verify after fixes
         print("  Re-verifying after review fixes...")
         verify_results = run_verification(cfg)
+        telem.record_verify(verify_results)
         if not all(v.passed for v in verify_results):
             print("  Review fixes broke tests, reverting to original.")
             git.rollback(pre_fix_sha)
@@ -517,3 +551,30 @@ def _do_merge(repo_path: str, pr_url: str, status: str) -> str:
     if merge_pr(repo_path, pr_url):
         return status
     return f"PR ready but merge failed (may need approval): {pr_url}"
+
+
+def _print_run_summary(telem: Telemetry, log: RunLogger) -> None:
+    s = telem.run_summary()
+    w = 50
+    print(f"\n{'=' * w}")
+    print(f" AutoCoder Run Summary ({log.run_id})")
+    print(f"{'=' * w}")
+    print(f"  Issues: {s.issues_processed} | PRs: {s.success_count} | Retries: {s.retry_count} | Skipped: {s.skip_count}")
+    print(f"  Total cost: ${s.total_cost_usd:.4f} | Cache hit: {s.overall_cache_hit_rate:.1%}")
+
+    if s.phase_cost_breakdown:
+        print(f"\n  Cost by Phase:")
+        for phase, cost in sorted(s.phase_cost_breakdown.items(), key=lambda x: -x[1]):
+            print(f"    {phase:<18} ${cost:.4f}")
+
+    if s.per_model_cost:
+        print(f"\n  Cost by Model:")
+        for model, cost in sorted(s.per_model_cost.items(), key=lambda x: -x[1]):
+            print(f"    {model:<18} ${cost:.4f}")
+
+    if s.top_failure_reasons:
+        reasons = " ".join(f"{r}({c})" for r, c in s.top_failure_reasons)
+        print(f"\n  Top Failures: {reasons}")
+
+    print(f"\n  Log: {log.log_path}")
+    print(f"{'=' * w}\n")

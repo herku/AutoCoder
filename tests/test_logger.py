@@ -71,14 +71,18 @@ def test_dead_letter():
         assert "test failed" in record["error"]
 
 
-def test_write_summary(capsys):
+def test_log_run_summary():
     with tempfile.TemporaryDirectory() as tmpdir:
         log = RunLogger(tmpdir)
-        log.log_attempt(
-            _make_issue(), 1, _make_agent_result(), [_make_verify_result()],
-            Outcome.SUCCESS,
-        )
-        log.write_summary()
-        output = capsys.readouterr().out
-        assert "PRs created:" in output
-        assert "1" in output
+        from autocoder.telemetry import Telemetry, Phase
+        telem = Telemetry()
+        telem.begin_issue(1, 1)
+        telem.record_phase(Phase.IMPLEMENT, _make_agent_result())
+        telem.end_issue(outcome="success")
+        log.log_run_summary(telem)
+
+        with open(log.log_path) as f:
+            record = json.loads(f.readline())
+        assert record["event"] == "run_summary"
+        assert record["success_count"] == 1
+        assert "phase_cost_breakdown" in record

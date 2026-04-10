@@ -187,7 +187,7 @@ def test_process_epic_all_success(mock_process, mock_fetch, mock_checkbox, mock_
     budget = MagicMock()
     budget.daily_exhausted.return_value = False
 
-    result = process_epic(epic, _make_cfg(), MagicMock(), budget, MagicMock(), MagicMock())
+    result = process_epic(epic, _make_cfg(), MagicMock(), budget, MagicMock(), MagicMock(), MagicMock())
 
     assert result.all_complete is True
     assert result.succeeded == [5, 10]
@@ -210,7 +210,7 @@ def test_process_epic_partial_failure(mock_process, mock_fetch, mock_checkbox, m
     budget = MagicMock()
     budget.daily_exhausted.return_value = False
 
-    result = process_epic(epic, _make_cfg(), MagicMock(), budget, MagicMock(), MagicMock())
+    result = process_epic(epic, _make_cfg(), MagicMock(), budget, MagicMock(), MagicMock(), MagicMock())
 
     assert result.all_complete is False
     assert result.succeeded == [5]
@@ -223,7 +223,7 @@ def test_process_epic_no_sub_issues(mock_fetch):
     epic = Issue(1, "Empty Epic", "No tasks here", ["epic"], Priority.P3, "")
     budget = MagicMock()
 
-    result = process_epic(epic, _make_cfg(), MagicMock(), budget, MagicMock(), MagicMock())
+    result = process_epic(epic, _make_cfg(), MagicMock(), budget, MagicMock(), MagicMock(), MagicMock())
 
     assert result.all_complete is True
     assert result.sub_issues == []
@@ -238,7 +238,7 @@ def test_process_epic_all_already_closed(mock_fetch, mock_close):
     budget = MagicMock()
     budget.daily_exhausted.return_value = False
 
-    result = process_epic(epic, _make_cfg(), MagicMock(), budget, MagicMock(), MagicMock())
+    result = process_epic(epic, _make_cfg(), MagicMock(), budget, MagicMock(), MagicMock(), MagicMock())
 
     assert result.all_complete is True
     assert result.skipped_closed == [5, 10]
@@ -256,7 +256,7 @@ def test_process_epic_nested_depth_guard(mock_process, mock_fetch, mock_comment)
     budget.daily_exhausted.return_value = False
 
     result = process_epic(
-        epic, _make_cfg(), MagicMock(), budget, MagicMock(), MagicMock(),
+        epic, _make_cfg(), MagicMock(), budget, MagicMock(), MagicMock(), MagicMock(),
         depth=_MAX_EPIC_DEPTH,
     )
 
@@ -276,7 +276,7 @@ def test_process_epic_budget_exhausted_stops(mock_process, mock_fetch, mock_chec
     budget = MagicMock()
     budget.daily_exhausted.side_effect = [False, True]  # exhausted after first
 
-    result = process_epic(epic, _make_cfg(), MagicMock(), budget, MagicMock(), MagicMock())
+    result = process_epic(epic, _make_cfg(), MagicMock(), budget, MagicMock(), MagicMock(), MagicMock())
 
     assert mock_process.call_count == 1
     assert result.succeeded == [5]

@@ -9,7 +9,7 @@ from autocoder.types import EpicResult, Issue, RateLimitError, is_epic
 _MAX_EPIC_DEPTH = 2
 
 
-def process_epic(epic, cfg, git, budget, log, timings, *, depth=0):
+def process_epic(epic, cfg, git, budget, log, timings, telem, *, depth=0):
     """Process an epic by implementing its sub-issues, then closing the epic."""
     tag = f"Epic #{epic.number}"
     sub_numbers = parse_sub_issues(epic.body)
@@ -43,7 +43,7 @@ def process_epic(epic, cfg, git, budget, log, timings, *, depth=0):
                 failed.append(sub.number)
                 continue
             print(f"  {tag}: sub-issue #{sub.number} is an epic, processing recursively...")
-            nested = process_epic(sub, cfg, git, budget, log, timings, depth=depth + 1)
+            nested = process_epic(sub, cfg, git, budget, log, timings, telem, depth=depth + 1)
             if nested.all_complete:
                 succeeded.append(sub.number)
             else:
@@ -52,7 +52,7 @@ def process_epic(epic, cfg, git, budget, log, timings, *, depth=0):
 
         print(f"  {tag} [{i}/{len(open_issues)}]: processing #{sub.number}: {sub.title}")
         try:
-            process_issue(sub, cfg, git, budget, log, timings)
+            process_issue(sub, cfg, git, budget, log, timings, telem)
             succeeded.append(sub.number)
             update_epic_checkbox(cfg.repo_path, epic.number, sub.number)
         except RateLimitError:
