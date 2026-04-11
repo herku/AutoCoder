@@ -49,6 +49,10 @@ class BudgetTracker:
         estimated_cost = (remaining_tokens * 0.6 * input_price + remaining_tokens * 0.4 * output_price) / 1_000_000
         return round(max(estimated_cost, 0.01), 2)
 
+    @property
+    def daily_tokens_used(self) -> int:
+        return self._daily_total_tokens
+
     def summary(self) -> dict:
         return {
             "daily_total_tokens": self._daily_total_tokens,

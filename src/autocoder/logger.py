@@ -151,6 +151,12 @@ class RunLogger:
             "per_model_cost": summary.per_model_cost,
             "overall_cache_hit_rate": round(summary.overall_cache_hit_rate, 4),
             "top_failure_reasons": summary.top_failure_reasons,
+            "total_tokens_in": summary.total_tokens_in,
+            "total_tokens_out": summary.total_tokens_out,
+            "total_tokens_cached": summary.total_tokens_cached,
+            "phase_token_detail": {k: list(v) for k, v in summary.phase_token_detail.items()},
+            "per_model_tokens": {k: list(v) for k, v in summary.per_model_tokens.items()},
+            "per_issue_summary": {str(k): list(v) for k, v in summary.per_issue_summary.items()},
         }
         self._append(self._log_path, record)
 

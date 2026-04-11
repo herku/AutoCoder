@@ -224,7 +224,7 @@ def run(cfg: RunConfig) -> None:
         _print_timing_summary(timings)
         log.log_timings(timings.steps)
         log.log_run_summary(telem)
-        _print_run_summary(telem, log)
+        _print_run_summary(telem, log, budget)
 
     finally:
         git.release_lock()
@@ -553,24 +553,50 @@ def _do_merge(repo_path: str, pr_url: str, status: str) -> str:
     return f"PR ready but merge failed (may need approval): {pr_url}"
 
 
-def _print_run_summary(telem: Telemetry, log: RunLogger) -> None:
-    s = telem.run_summary()
-    w = 50
+def _fmt_tok(n: int) -> str:
+    """Format token count compactly: 1.2M, 450K, 3.8K, 800."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.0f}K"
+    return str(n)
+
+
+def _print_run_summary(telem: Telemetry, log: RunLogger, budget: "BudgetTracker") -> None:
+    s = telem.run_summary(
+        daily_tokens_used=budget.daily_tokens_used,
+        daily_cap_tokens=budget.daily_cap_tokens,
+    )
+    w = 58
     print(f"\n{'=' * w}")
     print(f" AutoCoder Run Summary ({log.run_id})")
     print(f"{'=' * w}")
     print(f"  Issues: {s.issues_processed} | PRs: {s.success_count} | Retries: {s.retry_count} | Skipped: {s.skip_count}")
     print(f"  Total cost: ${s.total_cost_usd:.4f} | Cache hit: {s.overall_cache_hit_rate:.1%}")
+    print(f"  Tokens: {_fmt_tok(s.total_tokens_in)} in | {_fmt_tok(s.total_tokens_out)} out | {_fmt_tok(s.total_tokens_cached)} cached")
+    if s.daily_cap_tokens > 0:
+        pct = s.daily_tokens_used / s.daily_cap_tokens * 100
+        remaining = max(s.daily_cap_tokens - s.daily_tokens_used, 0)
+        print(f"  Budget: {pct:.0f}% used ({_fmt_tok(s.daily_tokens_used)} / {_fmt_tok(s.daily_cap_tokens)}) | {_fmt_tok(remaining)} remaining")
 
-    if s.phase_cost_breakdown:
-        print(f"\n  Cost by Phase:")
+    if s.phase_token_detail:
+        lw = max(len(p) for p in s.phase_token_detail)
+        print(f"\n  {'Phase':<{lw+2}} {'in':>6} {'out':>6} {'cached':>6}     {'cost':>8}")
         for phase, cost in sorted(s.phase_cost_breakdown.items(), key=lambda x: -x[1]):
-            print(f"    {phase:<18} ${cost:.4f}")
+            ti, to, tc = s.phase_token_detail.get(phase, (0, 0, 0))
+            print(f"    {phase:<{lw}} {_fmt_tok(ti):>6} {_fmt_tok(to):>6} {_fmt_tok(tc):>6}   ${cost:>8.4f}")
 
-    if s.per_model_cost:
-        print(f"\n  Cost by Model:")
+    if s.per_model_tokens:
+        lw = max(len(m) for m in s.per_model_tokens)
+        print(f"\n  {'Model':<{lw+2}} {'in':>6} {'out':>6} {'cached':>6}     {'cost':>8}")
         for model, cost in sorted(s.per_model_cost.items(), key=lambda x: -x[1]):
-            print(f"    {model:<18} ${cost:.4f}")
+            ti, to, tc = s.per_model_tokens.get(model, (0, 0, 0))
+            print(f"    {model:<{lw}} {_fmt_tok(ti):>6} {_fmt_tok(to):>6} {_fmt_tok(tc):>6}   ${cost:>8.4f}")
+
+    if s.per_issue_summary:
+        print(f"\n  {'Issue':<8} {'in':>6} {'out':>6} {'cached':>6}     {'cost':>8}")
+        for inum, (ti, to, tc, cost) in sorted(s.per_issue_summary.items(), key=lambda x: -x[1][3]):
+            print(f"    #{inum:<6} {_fmt_tok(ti):>6} {_fmt_tok(to):>6} {_fmt_tok(tc):>6}   ${cost:>8.4f}")
 
     if s.top_failure_reasons:
         reasons = " ".join(f"{r}({c})" for r, c in s.top_failure_reasons)

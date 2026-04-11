@@ -103,6 +103,15 @@ class RunSummary:
     per_model_cost: dict[str, float]
     overall_cache_hit_rate: float
     top_failure_reasons: list[tuple[str, int]]
+    # Expanded token fields
+    total_tokens_in: int = 0
+    total_tokens_out: int = 0
+    total_tokens_cached: int = 0
+    daily_tokens_used: int = 0
+    daily_cap_tokens: int = 0
+    phase_token_detail: dict[str, tuple[int, int, int]] = field(default_factory=dict)
+    per_model_tokens: dict[str, tuple[int, int, int]] = field(default_factory=dict)
+    per_issue_summary: dict[int, tuple[int, int, int, float]] = field(default_factory=dict)
 
 
 class Telemetry:
@@ -210,21 +219,47 @@ class Telemetry:
             "total_phase_cost_usd": round(it.total_cost_usd, 6),
         }
 
-    def run_summary(self) -> RunSummary:
+    def run_summary(
+        self, daily_tokens_used: int = 0, daily_cap_tokens: int = 0,
+    ) -> RunSummary:
         outcomes = Counter(it.outcome for it in self._completed)
         phase_cost: dict[str, float] = {}
         phase_tokens: dict[str, int] = {}
         model_cost: dict[str, float] = {}
         total_in = 0
+        total_out = 0
         total_cached = 0
+        phase_detail: dict[str, list[int]] = {}
+        model_tokens: dict[str, list[int]] = {}
+        issue_agg: dict[int, list] = {}
 
         for it in self._completed:
+            key = it.issue_number
+            if key not in issue_agg:
+                issue_agg[key] = [0, 0, 0, 0.0]
             for p in it.phases:
                 phase_cost[p.phase.value] = phase_cost.get(p.phase.value, 0) + p.cost_usd
                 phase_tokens[p.phase.value] = phase_tokens.get(p.phase.value, 0) + p.tokens_in + p.tokens_out
                 model_cost[p.model] = model_cost.get(p.model, 0) + p.cost_usd
                 total_in += p.tokens_in
+                total_out += p.tokens_out
                 total_cached += p.tokens_cached
+
+                pd = phase_detail.setdefault(p.phase.value, [0, 0, 0])
+                pd[0] += p.tokens_in
+                pd[1] += p.tokens_out
+                pd[2] += p.tokens_cached
+
+                mt = model_tokens.setdefault(p.model, [0, 0, 0])
+                mt[0] += p.tokens_in
+                mt[1] += p.tokens_out
+                mt[2] += p.tokens_cached
+
+                ia = issue_agg[key]
+                ia[0] += p.tokens_in
+                ia[1] += p.tokens_out
+                ia[2] += p.tokens_cached
+                ia[3] += p.cost_usd
 
         failures = Counter(
             it.failure_category.value
@@ -246,4 +281,12 @@ class Telemetry:
             per_model_cost={k: round(v, 6) for k, v in model_cost.items()},
             overall_cache_hit_rate=total_cached / total_in if total_in > 0 else 0.0,
             top_failure_reasons=failures.most_common(),
+            total_tokens_in=total_in,
+            total_tokens_out=total_out,
+            total_tokens_cached=total_cached,
+            daily_tokens_used=daily_tokens_used,
+            daily_cap_tokens=daily_cap_tokens,
+            phase_token_detail={k: tuple(v) for k, v in phase_detail.items()},
+            per_model_tokens={k: tuple(v) for k, v in model_tokens.items()},
+            per_issue_summary={k: tuple(v) for k, v in issue_agg.items()},
         )
