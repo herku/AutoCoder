@@ -9,9 +9,9 @@ from pathlib import Path
 
 from autocoder.agent import (
     build_prompt, build_plan_prompt, build_implement_prompt,
-    build_update_claude_md_prompt, build_ci_learn_prompt,
+    build_update_claude_md_prompt, build_ci_learn_prompt, build_impl_learn_prompt,
     invoke_agent, TIMEOUT_PLAN, TIMEOUT_IMPLEMENT,
-    TIMEOUT_CLAUDE_MD, BUDGET_CLAUDE_MD, BUDGET_CI_LEARN,
+    TIMEOUT_CLAUDE_MD, BUDGET_CLAUDE_MD, BUDGET_CI_LEARN, BUDGET_IMPL_LEARN,
 )
 from autocoder.anticheat import audit_diff, protect_test_files, restore_test_files
 from autocoder.budget import BudgetTracker
@@ -378,6 +378,29 @@ def process_issue(
                         print(f"  CLAUDE.md updated.")
                 except Exception as e:
                     print(f"  CLAUDE.md update failed: {str(e)[:100]}, skipping.")
+
+            # Stage 4.95: Learn from implementation
+            try:
+                print("  Capturing implementation learnings...")
+                with StepTimer(f"impl_learn {tag}", timings):
+                    impl_diff = git.diff_stats()
+                    verify_summary = "\n".join(
+                        f"- {v.stage}: {'PASS' if v.passed else 'FAIL'}" for v in verify_results
+                    )
+                    learn_prompt = build_impl_learn_prompt(impl_diff, verify_summary)
+                    learn_sandbox = build_claude_md_sandbox(cfg)
+                    learn_budget = min(BUDGET_IMPL_LEARN, budget.remaining_for_issue_usd(cfg.model))
+                    learn_result = invoke_agent(
+                        learn_prompt, cfg.repo_path, cfg.model, cfg.effort,
+                        learn_budget, learn_sandbox, timeout=TIMEOUT_CLAUDE_MD,
+                    )
+                budget.record(learn_result)
+                if learn_result.is_error:
+                    print("  Implementation learnings failed (agent error), skipping.")
+                else:
+                    print("  Implementation learnings saved.")
+            except Exception as e:
+                print(f"  Implementation learnings failed: {str(e)[:100]}, skipping.")
 
             # Stage 5: Commit and PR
             with StepTimer(f"commit_pr {tag}", timings):
