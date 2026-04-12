@@ -29,6 +29,8 @@ def build_sandbox(cfg: RunConfig) -> SandboxConfig:
         "Bash(git log:*)",
     ]
 
+    if cfg.build_cmd:
+        tools.append(f"Bash({cfg.build_cmd})")
     if cfg.lint_cmd:
         tools.append(f"Bash({cfg.lint_cmd})")
     if cfg.test_cmd:
@@ -42,6 +44,7 @@ def build_sandbox(cfg: RunConfig) -> SandboxConfig:
         "Bash(npx:*)",
         "Bash(python:*)",
         "Bash(pip:*)",
+        "Bash(uv:*)",
         "Bash(make:*)",
         "Bash(cargo:*)",
         "Bash(go:*)",

@@ -237,6 +237,7 @@ def process_issue(
     error_context = ""
     agent_result = None
     verify_results = []
+    build_failures = 0
     sandbox = build_sandbox(cfg)
     plan_sandbox = build_plan_sandbox(cfg) if cfg.plan_mode else None
     budget.reset_issue()
@@ -423,8 +424,33 @@ def process_issue(
         except (AgentError, VerificationError, AntiCheatViolation, RuntimeError) as e:
             # Classify failure for telemetry
             if isinstance(e, VerificationError):
-                _stage_map = {"lint": FailureCategory.LINT_FAIL, "unit": FailureCategory.TEST_FAIL, "integration": FailureCategory.INTEGRATION_FAIL}
+                _stage_map = {
+                    "build": FailureCategory.BUILD_FAIL,
+                    "lint": FailureCategory.LINT_FAIL,
+                    "unit": FailureCategory.TEST_FAIL,
+                    "integration": FailureCategory.INTEGRATION_FAIL,
+                }
                 telem.record_failure(_stage_map.get(e.stage, FailureCategory.TEST_FAIL))
+
+                # Separate build retry budget
+                if e.stage == "build":
+                    build_failures += 1
+                    if build_failures > cfg.build_retries:
+                        if protected_files:
+                            restore_test_files(protected_files)
+                        git.rollback(checkpoint)
+                        git.checkout_main()
+                        issue_telem = telem.end_issue(outcome=Outcome.SKIP.value)
+                        log.log_attempt(
+                            issue, attempt, agent_result, verify_results,
+                            Outcome.SKIP, error=str(e), telemetry=issue_telem,
+                        )
+                        log.dead_letter(issue, f"Build failed after {cfg.build_retries} retries: {e}")
+                        label_failed(cfg.repo_path, issue.number)
+                        comment_failure(cfg.repo_path, issue.number, str(e))
+                        git.delete_branch(branch)
+                        print(f"  Build retries exhausted ({cfg.build_retries}). Dead-lettered.\n")
+                        return
             elif isinstance(e, AntiCheatViolation):
                 telem.record_failure(FailureCategory.ANTICHEAT_VIOLATION)
             elif isinstance(e, AgentError):

@@ -79,6 +79,8 @@ class RunConfig:
     auto_merge: bool
     plan_mode: bool
     issue_numbers: list[int] = field(default_factory=list)
+    build_cmd: Optional[str] = None
+    build_retries: int = 1
     update_claude_md: bool = True
     force_prioritize: bool = False
     update_docker: bool = False

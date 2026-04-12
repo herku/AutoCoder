@@ -9,6 +9,8 @@ from autocoder.loop import run
 @click.command()
 @click.option("--repo", required=True, type=click.Path(exists=True), help="Path to target git repository")
 @click.option("--labels", default=None, help="Comma-separated labels to filter by (omit to fetch all open issues)")
+@click.option("--build-cmd", default=None, help="Build command (e.g. 'npm run build'). Auto-detected if not specified.")
+@click.option("--build-retries", default=1, type=int, help="Max retries for build failures (default 1)")
 @click.option("--test-cmd", default=None, help="Test command (e.g. 'npm test')")
 @click.option("--lint-cmd", default=None, help="Lint command (e.g. 'npm run lint')")
 @click.option("--integration-cmd", default=None, help="Integration test command")

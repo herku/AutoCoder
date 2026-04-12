@@ -2,13 +2,14 @@ from autocoder.types import RunConfig
 from autocoder.verify import format_failure, run_verification
 
 
-def _make_config(test_cmd=None, lint_cmd=None, integration_cmd=None):
+def _make_config(test_cmd=None, lint_cmd=None, integration_cmd=None, build_cmd=None):
     return RunConfig(
         repo_path="/tmp",
         labels=["P0"],
         test_cmd=test_cmd,
         lint_cmd=lint_cmd,
         integration_cmd=integration_cmd,
+        build_cmd=build_cmd,
         model="sonnet",
         plan_model="opus",
         review_model="opus",
@@ -50,6 +51,31 @@ def test_run_verification_no_commands():
     cfg = _make_config()
     results = run_verification(cfg)
     assert len(results) == 0
+
+
+def test_run_verification_build_first():
+    cfg = _make_config(build_cmd="true", lint_cmd="true", test_cmd="true")
+    results = run_verification(cfg)
+    assert len(results) == 3
+    assert results[0].stage == "build"
+    assert results[1].stage == "lint"
+    assert results[2].stage == "unit"
+    assert all(r.passed for r in results)
+
+
+def test_run_verification_build_fails_stops_pipeline():
+    cfg = _make_config(build_cmd="false", lint_cmd="true", test_cmd="true")
+    results = run_verification(cfg)
+    assert len(results) == 1
+    assert results[0].stage == "build"
+    assert not results[0].passed
+
+
+def test_run_verification_no_build_cmd():
+    cfg = _make_config(lint_cmd="true", test_cmd="true")
+    results = run_verification(cfg)
+    assert len(results) == 2
+    assert results[0].stage == "lint"
 
 
 def test_format_failure():

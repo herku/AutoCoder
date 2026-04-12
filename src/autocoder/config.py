@@ -12,6 +12,8 @@ from autocoder.types import RunConfig
 def build_config(
     repo: str,
     labels: str | None,
+    build_cmd: str | None,
+    build_retries: int,
     test_cmd: str | None,
     lint_cmd: str | None,
     integration_cmd: str | None,
@@ -124,12 +126,19 @@ def build_config(
 
     issue_numbers = list(issues)
 
+    # Auto-detect build command if not explicitly provided
+    if build_cmd is None:
+        from autocoder.build import detect_build_cmd
+        build_cmd = detect_build_cmd(repo_path)
+
     return RunConfig(
         repo_path=repo_path,
         labels=[l.strip() for l in labels.split(",") if l.strip()] if labels else [],
         test_cmd=test_cmd,
         lint_cmd=lint_cmd,
         integration_cmd=integration_cmd,
+        build_cmd=build_cmd,
+        build_retries=build_retries,
         model=model,
         plan_model=plan_model,
         review_model=review_model,

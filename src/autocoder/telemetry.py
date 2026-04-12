@@ -18,6 +18,7 @@ class Phase(str, Enum):
 
 
 class FailureCategory(str, Enum):
+    BUILD_FAIL = "build_fail"
     LINT_FAIL = "lint_fail"
     TEST_FAIL = "test_fail"
     INTEGRATION_FAIL = "integration_fail"
