@@ -19,8 +19,8 @@ from autocoder.git import GitOps
 from autocoder.epic import process_epic
 from autocoder.issues import analyze_and_prioritize, fetch_issues, fetch_issues_by_number, parse_sub_issues
 from autocoder.logger import RunLogger
-from autocoder.pr import comment_failure, create_pr, label_failed, mark_ready, merge_pr
-from autocoder.review import build_fix_prompt, review_pr_diff
+from autocoder.pr import comment_failure, create_pr, label_failed, mark_ready, merge_pr, wait_for_ci
+from autocoder.review import build_ci_fix_prompt, build_fix_prompt, review_pr_diff
 from autocoder.sandbox import SandboxConfig, build_sandbox, build_plan_sandbox, build_claude_md_sandbox
 from autocoder.testplan import (
     build_test_plan_fix_prompt,
@@ -500,7 +500,7 @@ def _post_pr_review_and_merge(
 
         if not review.has_actionable_issues:
             print("  Review: no critical/medium issues found.")
-            return _do_merge(cfg.repo_path, pr_url, "Merged (clean)")
+            return _do_merge(cfg, git, budget, issue, branch, pr_url, sandbox, telem)
 
         # Log findings
         for f in review.findings:
@@ -518,10 +518,10 @@ def _post_pr_review_and_merge(
             raise
         except AgentError as e:
             print(f"  Fix agent failed: {str(e)[:100]}")
-            return _do_merge(cfg.repo_path, pr_url, "Merged (fix agent failed, using original)")
+            return _do_merge(cfg, git, budget, issue, branch, pr_url, sandbox, telem)
 
         if fix_result.is_error:
-            return _do_merge(cfg.repo_path, pr_url, "Merged (fix agent error, using original)")
+            return _do_merge(cfg, git, budget, issue, branch, pr_url, sandbox, telem)
 
         # Re-verify after fixes
         print("  Re-verifying after review fixes...")
@@ -531,26 +531,87 @@ def _post_pr_review_and_merge(
             print("  Review fixes broke tests, reverting to original.")
             git.rollback(pre_fix_sha)
             git.push_branch(branch)
-            return _do_merge(cfg.repo_path, pr_url, "Merged (fix broke tests, reverted)")
+            return _do_merge(cfg, git, budget, issue, branch, pr_url, sandbox, telem)
 
         # Push review fixes
         git.commit_all(f"{commit_prefix(issue)}: address review feedback for #{issue.number}")
         git.push_branch(branch)
-        return _do_merge(cfg.repo_path, pr_url, "Merged (with review fixes)")
+        return _do_merge(cfg, git, budget, issue, branch, pr_url, sandbox, telem)
 
     except RateLimitError:
         raise  # Propagate to stop all processing
     except Exception as e:
         print(f"  Review/merge error: {str(e)[:200]}")
-        return _do_merge(cfg.repo_path, pr_url, "Merged (review failed, using original)")
+        return _do_merge(cfg, git, budget, issue, branch, pr_url, sandbox, telem)
 
 
-def _do_merge(repo_path: str, pr_url: str, status: str) -> str:
-    """Mark PR ready and squash-merge. Returns status string."""
-    mark_ready(repo_path, pr_url)
-    if merge_pr(repo_path, pr_url):
-        return status
-    return f"PR ready but merge failed (may need approval): {pr_url}"
+def _do_merge(
+    cfg: RunConfig,
+    git: GitOps,
+    budget: BudgetTracker,
+    issue,
+    branch: str,
+    pr_url: str,
+    sandbox: SandboxConfig,
+    telem: Telemetry,
+) -> str:
+    """Mark PR ready, wait for CI, auto-fix if needed, then merge."""
+    mark_ready(cfg.repo_path, pr_url)
+
+    for ci_attempt in range(1, cfg.max_retries + 1):
+        print(f"  Waiting for CI checks (attempt {ci_attempt}, timeout {cfg.ci_timeout}s)...")
+        ci_result = wait_for_ci(cfg.repo_path, pr_url, cfg.ci_timeout)
+
+        if ci_result.timed_out:
+            print(f"  CI timed out after {cfg.ci_timeout}s. Skipping merge.")
+            telem.record_failure(FailureCategory.CI_TIMEOUT)
+            return f"PR ready but CI timed out after {cfg.ci_timeout}s: {pr_url}"
+
+        if ci_result.passed:
+            if merge_pr(cfg.repo_path, pr_url):
+                label = "clean" if ci_attempt == 1 else f"after {ci_attempt - 1} CI fix(es)"
+                return f"Merged ({label})"
+            return f"PR ready, CI passed, but merge failed (may need approval): {pr_url}"
+
+        # CI failed — attempt fix
+        print(f"  CI checks failed. Attempting fix ({ci_attempt}/{cfg.max_retries})...")
+        telem.record_failure(FailureCategory.CI_FAIL)
+
+        if ci_attempt >= cfg.max_retries:
+            print("  Max CI fix retries reached. Skipping merge.")
+            return f"PR ready but CI failed after {cfg.max_retries} attempts: {pr_url}"
+
+        fix_prompt = build_ci_fix_prompt(ci_result.output)
+        max_budget = budget.remaining_for_issue_usd(cfg.model)
+
+        try:
+            fix_result = invoke_agent(fix_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox)
+            budget.record(fix_result)
+            telem.record_phase(Phase.CI_FIX, fix_result)
+        except RateLimitError:
+            raise
+        except (AgentError, Exception) as e:
+            print(f"  CI fix agent failed: {str(e)[:100]}")
+            return f"PR ready but CI fix agent failed: {pr_url}"
+
+        if fix_result.is_error:
+            print("  CI fix agent returned error. Skipping merge.")
+            return f"PR ready but CI fix agent error: {pr_url}"
+
+        # Re-verify locally before pushing
+        print("  Re-verifying after CI fix...")
+        verify_results = run_verification(cfg)
+        telem.record_verify(verify_results)
+
+        if not all(v.passed for v in verify_results):
+            print("  CI fix broke local tests. Skipping merge.")
+            return f"PR ready but CI fix broke local verification: {pr_url}"
+
+        git.commit_all(f"{commit_prefix(issue)}: fix CI for #{issue.number}")
+        git.push_branch(branch)
+        print("  Pushed CI fix. Re-checking CI...")
+
+    return f"PR ready but CI failed: {pr_url}"
 
 
 def _fmt_tok(n: int) -> str:

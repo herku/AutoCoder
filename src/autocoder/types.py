@@ -83,6 +83,7 @@ class RunConfig:
     force_prioritize: bool = False
     update_docker: bool = False
     docker_max_age_days: int = 7
+    ci_timeout: int = 1800
 
 
 @dataclass
@@ -111,6 +112,13 @@ class TestPlanResult:
     items: list[PlanCheckItem]
     raw_response: str
     all_passed: bool
+
+
+@dataclass
+class CIResult:
+    passed: bool
+    output: str
+    timed_out: bool
 
 
 class AgentError(Exception):

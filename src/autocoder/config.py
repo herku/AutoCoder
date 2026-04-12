@@ -39,6 +39,7 @@ def build_config(
     issues: tuple[int, ...] = (),
     plan_mode: bool = False,
     update_claude_md: bool = True,
+    ci_timeout: int = 1800,
 ) -> RunConfig:
     repo_path = str(Path(repo).resolve())
 
@@ -153,4 +154,5 @@ def build_config(
         plan_mode=plan_mode,
         issue_numbers=issue_numbers,
         update_claude_md=update_claude_md,
+        ci_timeout=ci_timeout,
     )

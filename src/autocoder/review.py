@@ -74,3 +74,12 @@ def build_fix_prompt(findings: list[ReviewFinding]) -> str:
         for f in findings
     )
     return load("review_fix").format(issues_text=issues_text)
+
+
+CI_OUTPUT_MAX = 30_000
+
+
+def build_ci_fix_prompt(ci_output: str) -> str:
+    """Build a prompt for the fix agent based on CI failure output."""
+    truncated = ci_output[:CI_OUTPUT_MAX] if len(ci_output) > CI_OUTPUT_MAX else ci_output
+    return load("ci_fix").format(ci_output=truncated)

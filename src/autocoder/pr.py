@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from typing import Optional
 
-from autocoder.types import Issue, PlanCheckItem, VerifyResult, commit_prefix
+from autocoder.types import CIResult, Issue, PlanCheckItem, VerifyResult, commit_prefix
 
 
 def create_pr(
@@ -160,6 +160,27 @@ def merge_pr(repo_path: str, pr_url: str) -> bool:
         check=False,
     )
     return result.returncode == 0
+
+
+def wait_for_ci(repo_path: str, pr_url: str, timeout: int) -> CIResult:
+    """Wait for CI checks to complete via gh pr checks --watch."""
+    pr_num = get_pr_number(pr_url)
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "checks", str(pr_num), "--watch", "--timeout", str(timeout)],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout + 30,
+        )
+    except subprocess.TimeoutExpired:
+        return CIResult(passed=False, output="", timed_out=True)
+
+    if result.returncode == 0:
+        return CIResult(passed=True, output=result.stdout, timed_out=False)
+
+    return CIResult(passed=False, output=result.stdout + result.stderr, timed_out=False)
 
 
 def comment_failure(repo_path: str, issue_num: int, error: str) -> None:

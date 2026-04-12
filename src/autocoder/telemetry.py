@@ -14,6 +14,7 @@ class Phase(str, Enum):
     REVIEW_FIX = "review_fix"
     TESTPLAN_FIX = "testplan_fix"
     UPDATE_CLAUDE_MD = "update_claude_md"
+    CI_FIX = "ci_fix"
 
 
 class FailureCategory(str, Enum):
@@ -28,6 +29,8 @@ class FailureCategory(str, Enum):
     AGENT_ERROR = "agent_error"
     ANTICHEAT_VIOLATION = "anticheat_violation"
     TIMEOUT = "timeout"
+    CI_FAIL = "ci_fail"
+    CI_TIMEOUT = "ci_timeout"
 
 
 @dataclass

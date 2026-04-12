@@ -32,6 +32,7 @@ from autocoder.loop import run
 @click.option("--max-retries", default=3, type=int, help="Max retry attempts per issue")
 @click.option("--protect-tests", is_flag=True, default=False, help="Prevent agent from modifying test files")
 @click.option("--auto-merge", is_flag=True, default=False, help="Auto-review, fix, and squash-merge PRs after creation")
+@click.option("--ci-timeout", default=1800, type=int, help="CI check timeout in seconds (default 1800)")
 @click.option("--issue", "issues", multiple=True, type=int, help="Specific issue number(s) to process (skips fetch and auto-prioritize)")
 @click.option("--plan-mode", is_flag=True, default=False, help="Agent plans before implementing each issue")
 @click.option("--update-claude-md/--no-update-claude-md", default=True, help="Update repo CLAUDE.md before committing")
