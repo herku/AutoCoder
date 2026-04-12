@@ -95,11 +95,14 @@ class GitOps:
             return current
         raise SystemExit("Error: Could not find main or master branch")
 
+    def get_head_sha(self) -> str:
+        result = self._run("rev-parse", "HEAD")
+        return result.stdout.strip()
+
     def save_checkpoint(self) -> str:
         if not self.has_commits():
             return ""  # Empty repo, no checkpoint possible
-        result = self._run("rev-parse", "HEAD")
-        return result.stdout.strip()
+        return self.get_head_sha()
 
     def create_branch(self, issue_num: int, title: str = "") -> str:
         slug = _slugify(title) if title else str(issue_num)

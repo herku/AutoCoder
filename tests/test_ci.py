@@ -1,7 +1,7 @@
 import subprocess
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, call
 
-from autocoder.pr import wait_for_ci
+from autocoder.pr import wait_for_ci, wait_for_new_checks
 from autocoder.prompts import load
 from autocoder.review import build_ci_fix_prompt, CI_OUTPUT_MAX
 from autocoder.types import CIResult
@@ -68,3 +68,36 @@ def test_ci_result_dataclass():
     assert r.passed is True
     assert r.output == "ok"
     assert r.timed_out is False
+
+
+def test_wait_for_new_checks_found_immediately():
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "2\n"
+    with patch("autocoder.pr.subprocess.run", return_value=mock_result):
+        assert wait_for_new_checks("/repo", "abc123", timeout=10) is True
+
+
+def test_wait_for_new_checks_found_after_retry():
+    no_checks = MagicMock(returncode=0, stdout="0\n")
+    has_checks = MagicMock(returncode=0, stdout="1\n")
+    with patch("autocoder.pr.subprocess.run", side_effect=[no_checks, has_checks]), \
+         patch("autocoder.pr.time.sleep"):
+        assert wait_for_new_checks("/repo", "abc123", timeout=60) is True
+
+
+def test_wait_for_new_checks_timeout():
+    no_checks = MagicMock(returncode=0, stdout="0\n")
+    # monotonic calls: deadline=0, while-check=50, sleep-arg=55, while-check=121 (exits)
+    with patch("autocoder.pr.subprocess.run", return_value=no_checks), \
+         patch("autocoder.pr.time.sleep"), \
+         patch("autocoder.pr.time.monotonic", side_effect=[0, 50, 55, 121]):
+        assert wait_for_new_checks("/repo", "abc123", timeout=120) is False
+
+
+def test_wait_for_new_checks_api_error():
+    bad_result = MagicMock(returncode=1, stdout="")
+    good_result = MagicMock(returncode=0, stdout="1\n")
+    with patch("autocoder.pr.subprocess.run", side_effect=[bad_result, good_result]), \
+         patch("autocoder.pr.time.sleep"):
+        assert wait_for_new_checks("/repo", "abc123", timeout=60) is True

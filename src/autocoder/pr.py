@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from typing import Optional
 
 from autocoder.types import CIResult, Issue, PlanCheckItem, VerifyResult, commit_prefix
@@ -160,6 +161,32 @@ def merge_pr(repo_path: str, pr_url: str) -> bool:
         check=False,
     )
     return result.returncode == 0
+
+
+def wait_for_new_checks(repo_path: str, commit_sha: str, timeout: int = 120) -> bool:
+    """Poll until GitHub has registered check suites for commit_sha."""
+    deadline = time.monotonic() + timeout
+    delay = 5
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            [
+                "gh", "api",
+                f"repos/{{owner}}/{{repo}}/commits/{commit_sha}/check-suites",
+                "--jq", ".total_count",
+            ],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        try:
+            if int(result.stdout.strip()) > 0:
+                return True
+        except (ValueError, AttributeError):
+            pass
+        time.sleep(min(delay, max(0, deadline - time.monotonic())))
+        delay = min(delay + 5, 15)
+    return False
 
 
 def wait_for_ci(repo_path: str, pr_url: str, timeout: int) -> CIResult:

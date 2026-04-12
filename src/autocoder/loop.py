@@ -19,7 +19,7 @@ from autocoder.git import GitOps
 from autocoder.epic import process_epic
 from autocoder.issues import analyze_and_prioritize, fetch_issues, fetch_issues_by_number, parse_sub_issues
 from autocoder.logger import RunLogger
-from autocoder.pr import comment_failure, create_pr, label_failed, mark_ready, merge_pr, wait_for_ci
+from autocoder.pr import comment_failure, create_pr, label_failed, mark_ready, merge_pr, wait_for_ci, wait_for_new_checks
 from autocoder.review import build_ci_fix_prompt, build_fix_prompt, review_pr_diff
 from autocoder.sandbox import SandboxConfig, build_sandbox, build_plan_sandbox, build_claude_md_sandbox
 from autocoder.testplan import (
@@ -558,6 +558,7 @@ def _do_merge(
     """Mark PR ready, wait for CI, auto-fix if needed, then merge."""
     mark_ready(cfg.repo_path, pr_url)
 
+    fixes_pushed = 0
     for ci_attempt in range(1, cfg.max_retries + 1):
         print(f"  Waiting for CI checks (attempt {ci_attempt}, timeout {cfg.ci_timeout}s)...")
         ci_result = wait_for_ci(cfg.repo_path, pr_url, cfg.ci_timeout)
@@ -569,17 +570,13 @@ def _do_merge(
 
         if ci_result.passed:
             if merge_pr(cfg.repo_path, pr_url):
-                label = "clean" if ci_attempt == 1 else f"after {ci_attempt - 1} CI fix(es)"
+                label = "clean" if fixes_pushed == 0 else f"after {fixes_pushed} CI fix(es)"
                 return f"Merged ({label})"
             return f"PR ready, CI passed, but merge failed (may need approval): {pr_url}"
 
         # CI failed — attempt fix
         print(f"  CI checks failed. Attempting fix ({ci_attempt}/{cfg.max_retries})...")
         telem.record_failure(FailureCategory.CI_FAIL)
-
-        if ci_attempt >= cfg.max_retries:
-            print("  Max CI fix retries reached. Skipping merge.")
-            return f"PR ready but CI failed after {cfg.max_retries} attempts: {pr_url}"
 
         fix_prompt = build_ci_fix_prompt(ci_result.output)
         max_budget = budget.remaining_for_issue_usd(cfg.model)
@@ -610,12 +607,26 @@ def _do_merge(
         try:
             git.commit_all(f"{commit_prefix(issue)}: fix CI for #{issue.number}")
         except RuntimeError:
-            print("  CI fix produced no code changes. Re-checking CI...")
-            continue
-        git.push_branch(branch)
-        print("  Pushed CI fix. Re-checking CI...")
+            print("  CI fix produced no code changes. Cannot fix CI automatically.")
+            return f"PR ready but CI fix produced no changes: {pr_url}"
 
-    return f"PR ready but CI failed: {pr_url}"
+        git.push_branch(branch)
+        fixes_pushed += 1
+        new_sha = git.get_head_sha()
+        print(f"  Pushed CI fix. Waiting for checks on {new_sha[:8]}...")
+        if not wait_for_new_checks(cfg.repo_path, new_sha):
+            print("  Warning: timed out waiting for new check suites. Proceeding anyway.")
+
+    # Final CI check after last fix
+    if fixes_pushed > 0:
+        print(f"  Final CI check (timeout {cfg.ci_timeout}s)...")
+        ci_result = wait_for_ci(cfg.repo_path, pr_url, cfg.ci_timeout)
+        if ci_result.passed:
+            if merge_pr(cfg.repo_path, pr_url):
+                return f"Merged (after {fixes_pushed} CI fix(es))"
+            return f"PR ready, CI passed, but merge failed (may need approval): {pr_url}"
+
+    return f"PR ready but CI failed after {cfg.max_retries} attempts: {pr_url}"
 
 
 def _fmt_tok(n: int) -> str:
