@@ -8,7 +8,6 @@ from autocoder.issues import (
     _dependency_reorder,
     _build_prioritize_prompt,
     _parse_priority_response,
-    _cache_key,
     _load_cache,
     _save_cache,
     analyze_and_prioritize,
@@ -312,18 +311,6 @@ def test_dependency_reorder_preserves_priority_among_unrelated():
 # --- Prioritization cache ---
 
 
-def test_cache_key_deterministic():
-    a = [Issue(3, "C", "", [], Priority.P0, ""), Issue(1, "A", "", [], Priority.P1, "")]
-    b = [Issue(1, "A", "", [], Priority.P1, ""), Issue(3, "C", "", [], Priority.P0, "")]
-    assert _cache_key(a) == _cache_key(b)
-
-
-def test_cache_key_changes_with_different_issues():
-    a = [Issue(1, "A", "", [], Priority.P0, "")]
-    b = [Issue(2, "B", "", [], Priority.P0, "")]
-    assert _cache_key(a) != _cache_key(b)
-
-
 def test_save_load_roundtrip(tmp_path):
     issues = _make_issues()
     priorities = {1: Priority.P0, 2: Priority.P3, 3: Priority.P1}
@@ -338,10 +325,30 @@ def test_save_load_roundtrip(tmp_path):
     assert loaded_deps == deps
 
 
-def test_load_cache_miss_different_issues(tmp_path):
+def test_load_cache_subset_hit(tmp_path):
+    """Removing issues (e.g. closed by AutoCoder) should still cache-hit."""
+    all_issues = _make_issues()  # issues 1, 2, 3
+    priorities = {1: Priority.P0, 2: Priority.P3, 3: Priority.P1}
+    reasons = {1: "Simple", 2: "Complex", 3: "Medium"}
+    deps = {2: [1, 3]}
+    _save_cache(str(tmp_path), all_issues, priorities, reasons, deps)
+    # Issue 1 was closed — only 2 and 3 remain
+    subset = [Issue(2, "Redesign auth", "", [], Priority.P3, ""),
+              Issue(3, "Add test", "", [], Priority.P1, "")]
+    result = _load_cache(str(tmp_path), subset)
+    assert result is not None
+    loaded_pri, loaded_reasons, loaded_deps = result
+    assert loaded_pri == {2: Priority.P3, 3: Priority.P1}
+    assert loaded_reasons == {2: "Complex", 3: "Medium"}
+    # Dep on issue 1 should be stripped since it's no longer present
+    assert loaded_deps == {2: [3]}
+
+
+def test_load_cache_miss_new_issue(tmp_path):
+    """A new issue not in cache should trigger re-prioritization."""
     issues_a = [Issue(1, "A", "", [], Priority.P0, ""), Issue(2, "B", "", [], Priority.P1, "")]
-    issues_b = [Issue(1, "A", "", [], Priority.P0, ""), Issue(4, "D", "", [], Priority.P1, "")]
     _save_cache(str(tmp_path), issues_a, {1: Priority.P0, 2: Priority.P1}, {}, {})
+    issues_b = [Issue(1, "A", "", [], Priority.P0, ""), Issue(4, "D", "", [], Priority.P1, "")]
     assert _load_cache(str(tmp_path), issues_b) is None
 
 

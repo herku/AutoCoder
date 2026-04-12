@@ -243,17 +243,15 @@ _CACHE_DIR = ".autocoder"
 _CACHE_FILE = "prioritization_cache.json"
 
 
-def _cache_key(issues: list[Issue]) -> str:
-    """Compute cache key from sorted issue numbers."""
-    nums = sorted(iss.number for iss in issues)
-    raw = ",".join(str(n) for n in nums)
-    return hashlib.sha256(raw.encode()).hexdigest()
-
-
 def _load_cache(
     repo_path: str, issues: list[Issue],
 ) -> tuple[dict[int, Priority], dict[int, str], dict[int, list[int]]] | None:
-    """Load cached prioritization if the issue set matches."""
+    """Load cached prioritization if current issues are a subset of cached.
+
+    Cache hit when every current issue was previously prioritized — allows
+    issues closed/merged between runs without triggering re-prioritization.
+    Cache miss when any *new* issue appears that wasn't in the cache.
+    """
     cache_path = Path(repo_path) / _CACHE_DIR / _CACHE_FILE
     if not cache_path.exists():
         return None
@@ -261,14 +259,27 @@ def _load_cache(
         data = json.loads(cache_path.read_text())
     except (json.JSONDecodeError, OSError):
         return None
-    if data.get("key") != _cache_key(issues):
+    try:
+        cached_numbers = set(data["cached_numbers"])
+    except (KeyError, TypeError):
+        return None
+    current_numbers = {iss.number for iss in issues}
+    if not current_numbers.issubset(cached_numbers):
         return None
     try:
-        priorities = {int(k): Priority(v) for k, v in data["priorities"].items()}
-        reasons = {int(k): v for k, v in data["reasons"].items()}
-        dependencies = {int(k): v for k, v in data["dependencies"].items()}
+        all_priorities = {int(k): Priority(v) for k, v in data["priorities"].items()}
+        all_reasons = {int(k): v for k, v in data["reasons"].items()}
+        all_deps = {int(k): v for k, v in data["dependencies"].items()}
     except (KeyError, ValueError):
         return None
+    # Filter to current issues only, strip stale dependency refs
+    priorities = {k: v for k, v in all_priorities.items() if k in current_numbers}
+    reasons = {k: v for k, v in all_reasons.items() if k in current_numbers}
+    dependencies = {
+        k: [d for d in v if d in current_numbers]
+        for k, v in all_deps.items()
+        if k in current_numbers
+    }
     return priorities, reasons, dependencies
 
 
@@ -285,7 +296,7 @@ def _save_cache(
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_path = cache_dir / _CACHE_FILE
         data = {
-            "key": _cache_key(issues),
+            "cached_numbers": sorted(priorities.keys()),
             "priorities": {str(k): v.value for k, v in priorities.items()},
             "reasons": {str(k): v for k, v in reasons.items()},
             "dependencies": {str(k): v for k, v in dependencies.items()},
