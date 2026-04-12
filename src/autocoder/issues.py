@@ -246,11 +246,11 @@ _CACHE_FILE = "prioritization_cache.json"
 def _load_cache(
     repo_path: str, issues: list[Issue],
 ) -> tuple[dict[int, Priority], dict[int, str], dict[int, list[int]]] | None:
-    """Load cached prioritization if current issues are a subset of cached.
+    """Load cached prioritization results.
 
-    Cache hit when every current issue was previously prioritized — allows
-    issues closed/merged between runs without triggering re-prioritization.
-    Cache miss when any *new* issue appears that wasn't in the cache.
+    Returns cached priorities/reasons/deps for issues that exist in the cache,
+    filtered to current issue numbers. Returns None only if no cache file exists
+    or the file is corrupt.
     """
     cache_path = Path(repo_path) / _CACHE_DIR / _CACHE_FILE
     if not cache_path.exists():
@@ -260,18 +260,12 @@ def _load_cache(
     except (json.JSONDecodeError, OSError):
         return None
     try:
-        cached_numbers = set(data["cached_numbers"])
-    except (KeyError, TypeError):
-        return None
-    current_numbers = {iss.number for iss in issues}
-    if not current_numbers.issubset(cached_numbers):
-        return None
-    try:
         all_priorities = {int(k): Priority(v) for k, v in data["priorities"].items()}
         all_reasons = {int(k): v for k, v in data["reasons"].items()}
         all_deps = {int(k): v for k, v in data["dependencies"].items()}
     except (KeyError, ValueError):
         return None
+    current_numbers = {iss.number for iss in issues}
     # Filter to current issues only, strip stale dependency refs
     priorities = {k: v for k, v in all_priorities.items() if k in current_numbers}
     reasons = {k: v for k, v in all_reasons.items() if k in current_numbers}
@@ -280,6 +274,8 @@ def _load_cache(
         for k, v in all_deps.items()
         if k in current_numbers
     }
+    if not priorities:
+        return None
     return priorities, reasons, dependencies
 
 
@@ -332,23 +328,37 @@ def analyze_and_prioritize(
     triage_model: str = "sonnet",
     force: bool = False,
 ) -> tuple[list[Issue], dict[int, str], dict[int, list[int]]]:
-    """Send all issues to Claude for AI-based priority scoring."""
+    """Send all issues to Claude for AI-based priority scoring.
+
+    Uses partial caching: cached issues keep their priorities, only new
+    (uncached) issues are sent to the AI. Results are merged and saved.
+    """
     if not issues:
         return issues, {}, {}
+
+    priorities: dict[int, Priority] = {}
+    reasons: dict[int, str] = {}
+    dependencies: dict[int, list[int]] = {}
+    issues_to_prioritize = issues
 
     if not force:
         cached = _load_cache(repo_path, issues)
         if cached is not None:
             priorities, reasons, dependencies = cached
-            for issue in issues:
-                if issue.number in priorities:
-                    issue.priority = priorities[issue.number]
-            sorted_issues = _priority_sort(issues)
-            sorted_issues = _dependency_reorder(sorted_issues, dependencies)
-            print("  Using cached prioritization results.")
-            return sorted_issues, reasons, dependencies
+            cached_numbers = set(priorities.keys())
+            uncached = [i for i in issues if i.number not in cached_numbers]
+            if not uncached:
+                for issue in issues:
+                    if issue.number in priorities:
+                        issue.priority = priorities[issue.number]
+                sorted_issues = _priority_sort(issues)
+                sorted_issues = _dependency_reorder(sorted_issues, dependencies)
+                print("  Using cached prioritization results.")
+                return sorted_issues, reasons, dependencies
+            print(f"  {len(cached_numbers)} issues cached, {len(uncached)} new issues to prioritize...")
+            issues_to_prioritize = uncached
 
-    prompt = _build_prioritize_prompt(issues)
+    prompt = _build_prioritize_prompt(issues_to_prioritize)
 
     result = subprocess.run(
         ["claude", "-p", "--model", triage_model, "--output-format", "text"],
@@ -362,12 +372,23 @@ def analyze_and_prioritize(
 
     if result.returncode != 0:
         print(f"  Warning: auto-prioritize failed ({result.returncode}), using default priorities", file=sys.stderr)
+        # Still apply any cached priorities we have
+        for issue in issues:
+            if issue.number in priorities:
+                issue.priority = priorities[issue.number]
+        return _priority_sort(issues), reasons, dependencies
+
+    new_priorities, new_reasons, new_dependencies = _parse_priority_response(
+        result.stdout, issues_to_prioritize,
+    )
+
+    if not new_priorities and not priorities:
         return _priority_sort(issues), {}, {}
 
-    priorities, reasons, dependencies = _parse_priority_response(result.stdout, issues)
-
-    if not priorities:
-        return _priority_sort(issues), {}, {}
+    # Merge new results into cached
+    priorities.update(new_priorities)
+    reasons.update(new_reasons)
+    dependencies.update(new_dependencies)
 
     for issue in issues:
         if issue.number in priorities:

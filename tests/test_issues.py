@@ -344,12 +344,17 @@ def test_load_cache_subset_hit(tmp_path):
     assert loaded_deps == {2: [3]}
 
 
-def test_load_cache_miss_new_issue(tmp_path):
-    """A new issue not in cache should trigger re-prioritization."""
+def test_load_cache_partial_hit_new_issue(tmp_path):
+    """A new issue not in cache returns partial results (cached issues only)."""
     issues_a = [Issue(1, "A", "", [], Priority.P0, ""), Issue(2, "B", "", [], Priority.P1, "")]
-    _save_cache(str(tmp_path), issues_a, {1: Priority.P0, 2: Priority.P1}, {}, {})
+    _save_cache(str(tmp_path), issues_a, {1: Priority.P0, 2: Priority.P1}, {1: "reason"}, {})
     issues_b = [Issue(1, "A", "", [], Priority.P0, ""), Issue(4, "D", "", [], Priority.P1, "")]
-    assert _load_cache(str(tmp_path), issues_b) is None
+    result = _load_cache(str(tmp_path), issues_b)
+    assert result is not None
+    priorities, reasons, deps = result
+    assert priorities == {1: Priority.P0}  # only issue #1 cached, #4 is new
+    assert reasons == {1: "reason"}
+    assert deps == {}
 
 
 def test_load_cache_missing_file(tmp_path):
