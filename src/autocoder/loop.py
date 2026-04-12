@@ -9,9 +9,9 @@ from pathlib import Path
 
 from autocoder.agent import (
     build_prompt, build_plan_prompt, build_implement_prompt,
-    build_update_claude_md_prompt,
+    build_update_claude_md_prompt, build_ci_learn_prompt,
     invoke_agent, TIMEOUT_PLAN, TIMEOUT_IMPLEMENT,
-    TIMEOUT_CLAUDE_MD, BUDGET_CLAUDE_MD,
+    TIMEOUT_CLAUDE_MD, BUDGET_CLAUDE_MD, BUDGET_CI_LEARN,
 )
 from autocoder.anticheat import audit_diff, protect_test_files, restore_test_files
 from autocoder.budget import BudgetTracker
@@ -571,6 +571,51 @@ def _post_pr_review_and_merge(
         return _do_merge(cfg, git, budget, issue, branch, pr_url, sandbox, telem)
 
 
+_CI_ATTEMPT_OUTPUT_MAX = 2000
+_CI_ATTEMPT_DIFF_MAX = 3000
+
+
+def _format_ci_attempt(attempt: int, ci_output: str, diff_summary: str) -> str:
+    """Format a single CI fix attempt for context accumulation."""
+    return (
+        f"## CI Fix Attempt {attempt}\n"
+        f"CI output:\n{ci_output[:_CI_ATTEMPT_OUTPUT_MAX]}\n\n"
+        f"Changes made:\n{diff_summary[:_CI_ATTEMPT_DIFF_MAX]}\n"
+        "---\n\n"
+    )
+
+
+def _run_ci_learn(
+    cfg: RunConfig,
+    git: GitOps,
+    budget: BudgetTracker,
+    issue,
+    branch: str,
+    ci_output: str,
+    fix_diff: str,
+    sandbox: SandboxConfig,
+) -> None:
+    """Persist CI fix learnings to the repo's CLAUDE.md (non-critical)."""
+    try:
+        learn_prompt = build_ci_learn_prompt(ci_output, fix_diff)
+        learn_sandbox = build_claude_md_sandbox(cfg)
+        learn_budget = min(BUDGET_CI_LEARN, budget.remaining_for_issue_usd(cfg.model))
+        learn_result = invoke_agent(
+            learn_prompt, cfg.repo_path, cfg.model, cfg.effort,
+            learn_budget, learn_sandbox, timeout=TIMEOUT_CLAUDE_MD,
+        )
+        budget.record(learn_result)
+        if not learn_result.is_error:
+            try:
+                git.commit_all(f"{commit_prefix(issue)}: CI learnings for #{issue.number}")
+                git.push_branch(branch)
+                print("  CI learnings saved to CLAUDE.md.")
+            except RuntimeError:
+                pass  # No changes to CLAUDE.md — nothing worth recording
+    except Exception:
+        pass  # Non-critical — don't fail the pipeline
+
+
 def _do_merge(
     cfg: RunConfig,
     git: GitOps,
@@ -585,6 +630,8 @@ def _do_merge(
     mark_ready(cfg.repo_path, pr_url)
 
     fixes_pushed = 0
+    ci_fix_context = ""  # Accumulate context between CI fix attempts
+
     for ci_attempt in range(1, cfg.max_retries + 1):
         print(f"  Waiting for CI checks (attempt {ci_attempt}, timeout {cfg.ci_timeout}s)...")
         ci_result = wait_for_ci(cfg.repo_path, pr_url, cfg.ci_timeout)
@@ -604,7 +651,7 @@ def _do_merge(
         print(f"  CI checks failed. Attempting fix ({ci_attempt}/{cfg.max_retries})...")
         telem.record_failure(FailureCategory.CI_FAIL)
 
-        fix_prompt = build_ci_fix_prompt(ci_result.output)
+        fix_prompt = build_ci_fix_prompt(ci_result.output, previous_attempts=ci_fix_context)
         max_budget = budget.remaining_for_issue_usd(cfg.model)
 
         try:
@@ -636,8 +683,16 @@ def _do_merge(
             print("  CI fix produced no code changes. Cannot fix CI automatically.")
             return f"PR ready but CI fix produced no changes: {pr_url}"
 
+        # Capture what was changed for next attempt's context
+        fix_diff = git.diff_last_commit_stats()
+        ci_fix_context += _format_ci_attempt(ci_attempt, ci_result.output, fix_diff)
+
         git.push_branch(branch)
         fixes_pushed += 1
+
+        # Learn from CI fix — persist tribal knowledge to repo's CLAUDE.md
+        _run_ci_learn(cfg, git, budget, issue, branch, ci_result.output, fix_diff, sandbox)
+
         new_sha = git.get_head_sha()
         print(f"  Pushed CI fix. Waiting for checks on {new_sha[:8]}...")
         if not wait_for_new_checks(cfg.repo_path, new_sha):

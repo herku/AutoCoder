@@ -174,6 +174,11 @@ class GitOps:
         result = self._run("diff", "--name-only", main, check=False)
         return [f for f in result.stdout.strip().split("\n") if f]
 
+    def diff_last_commit_stats(self) -> str:
+        """Stat summary of the most recent commit's changes."""
+        result = self._run("diff", "HEAD~1", "--stat", check=False)
+        return result.stdout.strip()
+
     def cleanup_orphan_branches(self) -> None:
         for prefix in ("feat/*", "ai/*"):
             result = self._run("branch", "--list", "--no-color", prefix)

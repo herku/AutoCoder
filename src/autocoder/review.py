@@ -79,7 +79,15 @@ def build_fix_prompt(findings: list[ReviewFinding]) -> str:
 CI_OUTPUT_MAX = 30_000
 
 
-def build_ci_fix_prompt(ci_output: str) -> str:
+def build_ci_fix_prompt(ci_output: str, previous_attempts: str = "") -> str:
     """Build a prompt for the fix agent based on CI failure output."""
+    from autocoder.agent import _error_block
+
     truncated = ci_output[:CI_OUTPUT_MAX] if len(ci_output) > CI_OUTPUT_MAX else ci_output
-    return load("ci_fix").format(ci_output=truncated)
+    base = load("ci_fix").format(ci_output=truncated)
+    if previous_attempts:
+        base += _error_block(
+            previous_attempts,
+            message="Previous CI fix attempt(s) did not resolve the issue.",
+        )
+    return base

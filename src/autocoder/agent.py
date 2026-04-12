@@ -87,6 +87,18 @@ def build_implement_prompt(issue: Issue, plan_text: str, error_context: str = ""
     )
 
 
+BUDGET_CI_LEARN = 1.00  # $1.00 max for CI learning step
+CI_LEARN_OUTPUT_MAX = 5_000
+CI_LEARN_DIFF_MAX = 5_000
+
+
+def build_ci_learn_prompt(ci_output: str, fix_diff: str) -> str:
+    """Build a prompt to capture CI fix learnings into the repo's CLAUDE.md."""
+    truncated_ci = ci_output[:CI_LEARN_OUTPUT_MAX]
+    truncated_diff = fix_diff[:CI_LEARN_DIFF_MAX]
+    return load("ci_learn").format(ci_output=truncated_ci, fix_diff=truncated_diff)
+
+
 TIMEOUT_PLAN = 3600  # 60 minutes for plan phase (read-only analysis)
 TIMEOUT_IMPLEMENT = 6000  # 100 minutes for implementation phase
 TIMEOUT_CLAUDE_MD = 600  # 10 minutes for CLAUDE.md update
