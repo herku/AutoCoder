@@ -607,7 +607,11 @@ def _do_merge(
             print("  CI fix broke local tests. Skipping merge.")
             return f"PR ready but CI fix broke local verification: {pr_url}"
 
-        git.commit_all(f"{commit_prefix(issue)}: fix CI for #{issue.number}")
+        try:
+            git.commit_all(f"{commit_prefix(issue)}: fix CI for #{issue.number}")
+        except RuntimeError:
+            print("  CI fix produced no code changes. Re-checking CI...")
+            continue
         git.push_branch(branch)
         print("  Pushed CI fix. Re-checking CI...")
 
