@@ -48,6 +48,8 @@ def build_sandbox(cfg: RunConfig) -> SandboxConfig:
         "Bash(make:*)",
         "Bash(cargo:*)",
         "Bash(go:*)",
+        "Bash(swift:*)",
+        "Bash(xcodebuild:*)",
     ])
 
     return SandboxConfig(allowed_tools=tools, docker=cfg.docker)

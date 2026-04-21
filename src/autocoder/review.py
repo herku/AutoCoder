@@ -91,3 +91,12 @@ def build_ci_fix_prompt(ci_output: str, previous_attempts: str = "") -> str:
             message="Previous CI fix attempt(s) did not resolve the issue.",
         )
     return base
+
+
+BUILD_OUTPUT_MAX = 30_000
+
+
+def build_build_fix_prompt(build_output: str, build_cmd: str = "") -> str:
+    """Build a prompt for the agent to fix a build failure."""
+    truncated = build_output[:BUILD_OUTPUT_MAX] if len(build_output) > BUILD_OUTPUT_MAX else build_output
+    return load("build_fix").format(build_output=truncated, build_cmd=build_cmd or "unknown")

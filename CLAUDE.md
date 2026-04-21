@@ -41,7 +41,8 @@ prompts/        Markdown templates loaded via prompts.load(name)
 2. Plan phase (optional `--plan-mode`): read-only analysis
 3. Implement phase: agent writes code with scoped permissions
 4. Anti-cheat audit (if `--protect-tests`): reject if test files modified
-5. Verification: lint -> unit -> integration (stop on first failure)
+5. Verification: lint -> unit -> integration -> build (stop on first failure)
+5a. Build fix (if build fails): focused agent fixes build errors, then re-verifies
 6. Test plan verification: check acceptance criteria checkboxes against diff
 7. CLAUDE.md update (if `--update-claude-md`): auto-document architecture changes
 8. PR creation: draft PR with summary, diff stats, test results
@@ -59,6 +60,7 @@ Templates live in `src/autocoder/prompts/*.md`, loaded via `prompts.load(name)`.
 - `testplan.md` / `testplan_fix.md` — acceptance criteria verification
 - `prioritize.md` — issue triage (P0-P3)
 - `detect_build.md` — AI-powered build command detection
+- `build_fix.md` — focused build failure fix
 - `update_claude_md.md` — architecture documentation update
 
 ## Key CLI Options

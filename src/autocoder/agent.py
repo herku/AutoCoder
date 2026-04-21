@@ -110,6 +110,7 @@ def build_impl_learn_prompt(diff_stats: str, verify_summary: str) -> str:
 
 TIMEOUT_PLAN = 3600  # 60 minutes for plan phase (read-only analysis)
 TIMEOUT_IMPLEMENT = 6000  # 100 minutes for implementation phase
+TIMEOUT_BUILD_FIX = 300  # 5 minutes for build fix attempt
 TIMEOUT_CLAUDE_MD = 600  # 10 minutes for CLAUDE.md update
 BUDGET_CLAUDE_MD = 2.00  # $2.00 max for doc update
 

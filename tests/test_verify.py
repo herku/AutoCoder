@@ -53,22 +53,24 @@ def test_run_verification_no_commands():
     assert len(results) == 0
 
 
-def test_run_verification_build_first():
+def test_run_verification_build_last():
     cfg = _make_config(build_cmd="true", lint_cmd="true", test_cmd="true")
     results = run_verification(cfg)
     assert len(results) == 3
-    assert results[0].stage == "build"
-    assert results[1].stage == "lint"
-    assert results[2].stage == "unit"
+    assert results[0].stage == "lint"
+    assert results[1].stage == "unit"
+    assert results[2].stage == "build"
     assert all(r.passed for r in results)
 
 
 def test_run_verification_build_fails_stops_pipeline():
     cfg = _make_config(build_cmd="false", lint_cmd="true", test_cmd="true")
     results = run_verification(cfg)
-    assert len(results) == 1
-    assert results[0].stage == "build"
-    assert not results[0].passed
+    assert len(results) == 3
+    assert results[0].stage == "lint"
+    assert results[1].stage == "unit"
+    assert results[2].stage == "build"
+    assert not results[2].passed
 
 
 def test_run_verification_no_build_cmd():

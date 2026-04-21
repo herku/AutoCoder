@@ -10,10 +10,10 @@ def run_verification(cfg: RunConfig) -> list[VerifyResult]:
     results: list[VerifyResult] = []
 
     steps = [
-        ("build", cfg.build_cmd),
         ("lint", cfg.lint_cmd),
         ("unit", cfg.test_cmd),
         ("integration", cfg.integration_cmd),
+        ("build", cfg.build_cmd),
     ]
 
     for stage, cmd in steps:

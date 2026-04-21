@@ -15,6 +15,7 @@ class Phase(str, Enum):
     TESTPLAN_FIX = "testplan_fix"
     UPDATE_CLAUDE_MD = "update_claude_md"
     CI_FIX = "ci_fix"
+    BUILD_FIX = "build_fix"
 
 
 class FailureCategory(str, Enum):

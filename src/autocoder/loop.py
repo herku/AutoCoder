@@ -10,7 +10,7 @@ from pathlib import Path
 from autocoder.agent import (
     build_prompt, build_plan_prompt, build_implement_prompt,
     build_update_claude_md_prompt, build_ci_learn_prompt, build_impl_learn_prompt,
-    invoke_agent, TIMEOUT_PLAN, TIMEOUT_IMPLEMENT,
+    invoke_agent, TIMEOUT_PLAN, TIMEOUT_IMPLEMENT, TIMEOUT_BUILD_FIX,
     TIMEOUT_CLAUDE_MD, BUDGET_CLAUDE_MD, BUDGET_CI_LEARN, BUDGET_IMPL_LEARN,
 )
 from autocoder.anticheat import audit_diff, protect_test_files, restore_test_files
@@ -20,7 +20,7 @@ from autocoder.epic import process_epic
 from autocoder.issues import analyze_and_prioritize, fetch_issues, fetch_issues_by_number, parse_sub_issues
 from autocoder.logger import RunLogger
 from autocoder.pr import comment_failure, create_pr, label_failed, mark_ready, merge_pr, wait_for_ci, wait_for_new_checks
-from autocoder.review import build_ci_fix_prompt, build_fix_prompt, review_pr_diff
+from autocoder.review import build_build_fix_prompt, build_ci_fix_prompt, build_fix_prompt, review_pr_diff
 from autocoder.sandbox import SandboxConfig, build_sandbox, build_plan_sandbox, build_claude_md_sandbox
 from autocoder.testplan import (
     build_test_plan_fix_prompt,
@@ -40,7 +40,7 @@ from autocoder.types import (
     commit_prefix,
     is_epic,
 )
-from autocoder.verify import format_failure, run_verification
+from autocoder.verify import _run_step, format_failure, run_verification
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +169,17 @@ def run(cfg: RunConfig) -> None:
                 sub_nums = parse_sub_issues(epic.body)
                 print(f"  Epic #{epic.number}: {epic.title} ({len(sub_nums)} sub-issues: {', '.join(f'#{n}' for n in sub_nums)})")
             return
+
+        # Pre-flight: verify build passes on main before processing any issues
+        if cfg.build_cmd:
+            print(f"Pre-flight build check: {cfg.build_cmd}")
+            preflight = _run_step(cfg.build_cmd, cfg.repo_path, "build")
+            if not preflight.passed:
+                output = (preflight.stderr or preflight.stdout or "").strip()
+                tail = "\n".join(output.split("\n")[-20:])
+                print(f"  FAILED — main branch does not build.\n  {tail}")
+                print("  Fix the build on main before running AutoCoder.")
+                return
 
         # Truncate regular issues to max_issues for processing
         regular_issues = regular_issues[:cfg.max_issues]
@@ -313,8 +324,32 @@ def process_issue(
 
             if not all(v.passed for v in verify_results):
                 failed = next(v for v in verify_results if not v.passed)
-                error_context = format_failure(failed)
-                raise VerificationError(failed.stage, error_context)
+                if failed.stage == "build":
+                    # Stage 4a: Attempt focused build fix before giving up
+                    print(f"  Build failed. Attempting fix...")
+                    with StepTimer(f"build_fix {tag} {att}", timings):
+                        fix_prompt = build_build_fix_prompt(format_failure(failed), cfg.build_cmd or "")
+                        max_budget = budget.remaining_for_issue_usd(cfg.model)
+                        fix_result = invoke_agent(
+                            fix_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox,
+                            timeout=TIMEOUT_BUILD_FIX,
+                        )
+                    budget.record(fix_result)
+                    telem.record_phase(Phase.BUILD_FIX, fix_result)
+
+                    if not fix_result.is_error:
+                        print(f"  Re-verifying after build fix...")
+                        with StepTimer(f"re_verify {tag} {att}", timings):
+                            verify_results = run_verification(cfg)
+                        telem.record_verify(verify_results)
+
+                    if fix_result.is_error or not all(v.passed for v in verify_results):
+                        failed = next((v for v in verify_results if not v.passed), failed)
+                        error_context = format_failure(failed)
+                        raise VerificationError(failed.stage, error_context)
+                else:
+                    error_context = format_failure(failed)
+                    raise VerificationError(failed.stage, error_context)
 
             # Stage 4.5: Test plan verification
             test_plan = TestPlanResult(items=[], raw_response="", all_passed=True)
