@@ -86,6 +86,11 @@ class RunConfig:
     update_docker: bool = False
     docker_max_age_days: int = 7
     ci_timeout: int = 1800
+    rate_limit_wait_seconds: Optional[int] = None
+    stalemate_threshold: int = 2
+    review_mode: str = "single"
+    review_budget_usd: float = 2.00
+    external_reviewer_cmd: Optional[list[str]] = None
 
 
 @dataclass
@@ -100,6 +105,15 @@ class ReviewResult:
     findings: list[ReviewFinding]
     raw_response: str
     has_actionable_issues: bool
+
+
+@dataclass
+class MultiReviewResult:
+    """Result from a multi-agent orchestrator review that fixes in-session."""
+    cleaned: bool  # True if REVIEW_DONE (nothing needed) or REVIEW_FIXED
+    failed: bool  # True if REVIEW_FAILED (unfixable critical issues)
+    summary: str  # Free-form summary (final signal line + optional reason)
+    raw_response: str
 
 
 @dataclass

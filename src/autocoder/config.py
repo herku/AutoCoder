@@ -2,11 +2,29 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
 from autocoder.types import RunConfig
+
+
+_DURATION_RE = re.compile(r"^\s*(\d+)\s*([smhSMH]?)\s*$")
+
+
+def parse_duration(value: str | None) -> int | None:
+    """Parse a duration string like '30s', '5m', '1h' into seconds. None if value is None/empty."""
+    if not value:
+        return None
+    match = _DURATION_RE.match(value)
+    if not match:
+        raise SystemExit(f"Error: invalid duration '{value}'. Use e.g. '30s', '5m', '1h'.")
+    num = int(match.group(1))
+    suffix = match.group(2).lower()
+    multiplier = {"": 1, "s": 1, "m": 60, "h": 3600}[suffix]
+    return num * multiplier
 
 
 def build_config(
@@ -42,6 +60,11 @@ def build_config(
     plan_mode: bool = False,
     update_claude_md: bool = True,
     ci_timeout: int = 1800,
+    wait_on_rate_limit: str | None = None,
+    stalemate_threshold: int = 2,
+    review_mode: str = "single",
+    review_budget_usd: float = 2.00,
+    external_reviewer: str | None = None,
 ) -> RunConfig:
     repo_path = str(Path(repo).resolve())
 
@@ -164,4 +187,9 @@ def build_config(
         issue_numbers=issue_numbers,
         update_claude_md=update_claude_md,
         ci_timeout=ci_timeout,
+        rate_limit_wait_seconds=parse_duration(wait_on_rate_limit),
+        stalemate_threshold=stalemate_threshold,
+        review_mode=review_mode,
+        review_budget_usd=review_budget_usd,
+        external_reviewer_cmd=shlex.split(external_reviewer) if external_reviewer else None,
     )

@@ -82,6 +82,20 @@ def build_claude_md_sandbox(cfg: RunConfig) -> SandboxConfig:
     return SandboxConfig(allowed_tools=tools, docker=cfg.docker)
 
 
+def build_review_sandbox(cfg: RunConfig) -> SandboxConfig:
+    """Build a sandbox for the multi-agent review orchestrator.
+
+    Needs the same write capabilities as the main sandbox (the orchestrator
+    fixes issues in-session) plus explicit Task whitelisting so it can spawn
+    parallel sub-agents.
+    """
+    base = build_sandbox(cfg)
+    tools = list(base.allowed_tools)
+    if "Task" not in tools:
+        tools.append("Task")
+    return SandboxConfig(allowed_tools=tools, docker=base.docker)
+
+
 def build_detect_sandbox(cfg: RunConfig) -> SandboxConfig:
     """Build a read-only sandbox for AI build command detection."""
     tools: list[str] = [

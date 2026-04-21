@@ -33,7 +33,7 @@ def _detect_build_cmd_ai(repo_path: str, model: str) -> Optional[str]:
     """Use claude -p to analyze repo and determine build command."""
     from autocoder.sandbox import SandboxConfig, build_claude_cmd
 
-    prompt = load("detect_build")
+    prompt = load("detect_build", repo_path)
     sandbox = SandboxConfig(
         allowed_tools=["Read", "Glob", "Grep", "Bash(git diff:*)", "Bash(git status:*)", "Bash(git log:*)"],
         docker=False,

@@ -358,7 +358,7 @@ def analyze_and_prioritize(
             print(f"  {len(cached_numbers)} issues cached, {len(uncached)} new issues to prioritize...")
             issues_to_prioritize = uncached
 
-    prompt = _build_prioritize_prompt(issues_to_prioritize)
+    prompt = _build_prioritize_prompt(issues_to_prioritize, repo_path)
 
     result = subprocess.run(
         ["claude", "-p", "--model", triage_model, "--output-format", "text"],
@@ -400,18 +400,18 @@ def analyze_and_prioritize(
     return sorted_issues, reasons, dependencies
 
 
-def _build_prioritize_prompt(issues: list[Issue]) -> str:
+def _build_prioritize_prompt(issues: list[Issue], repo_path: str = "") -> str:
     body_max = PRIORITIZE_BODY_MAX
 
     while body_max >= 200:
         formatted = _format_issues_for_prompt(issues, body_max)
-        prompt = load("prioritize").format(formatted_issues=formatted)
+        prompt = load("prioritize", repo_path or None).format(formatted_issues=formatted)
         if len(prompt) <= PROMPT_CHAR_LIMIT:
             return prompt
         body_max //= 2
 
     formatted = _format_issues_for_prompt(issues, 200)
-    return load("prioritize").format(formatted_issues=formatted)
+    return load("prioritize", repo_path or None).format(formatted_issues=formatted)
 
 
 def _format_issues_for_prompt(issues: list[Issue], body_max: int) -> str:

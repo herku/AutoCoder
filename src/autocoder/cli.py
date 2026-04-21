@@ -43,6 +43,34 @@ from autocoder.loop import run
     default="**/test_*,**/*_test.*,**/tests/**,**/*.test.*,**/*.spec.*",
     help="Comma-separated glob patterns for test files",
 )
+@click.option(
+    "--wait-on-rate-limit",
+    default=None,
+    help="On rate-limit errors, wait this duration (e.g. '30s', '5m', '1h') and retry up to 3 times. Default: abort immediately.",
+)
+@click.option(
+    "--stalemate-threshold",
+    default=2,
+    type=int,
+    help="Abort review/CI-fix loops after N consecutive no-change iterations (default 2).",
+)
+@click.option(
+    "--review-mode",
+    default="single",
+    type=click.Choice(["single", "multi"]),
+    help="Code review mode: 'single' (one reviewer) or 'multi' (5 parallel specialized reviewers that also fix in-session).",
+)
+@click.option(
+    "--review-budget-usd",
+    default=2.00,
+    type=float,
+    help="Budget cap for the multi-agent review orchestrator (default $2.00).",
+)
+@click.option(
+    "--external-reviewer",
+    default=None,
+    help="Second-opinion reviewer command; prompt is piped on stdin. Example: 'codex -p --model gpt-5' or 'claude -p --model claude-opus-4-6 --output-format text'.",
+)
 def main(**kwargs: object) -> None:
     """AutoCoder: Autonomous AI coding agent loop.
 

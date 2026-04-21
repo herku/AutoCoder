@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 from autocoder.agent import (
     build_prompt, build_plan_prompt, build_implement_prompt,
     build_update_claude_md_prompt, build_ci_learn_prompt, build_impl_learn_prompt,
-    invoke_agent, TIMEOUT_PLAN, TIMEOUT_IMPLEMENT, TIMEOUT_BUILD_FIX,
+    invoke_agent, set_rate_limit_wait, TIMEOUT_PLAN, TIMEOUT_IMPLEMENT, TIMEOUT_BUILD_FIX,
     TIMEOUT_CLAUDE_MD, BUDGET_CLAUDE_MD, BUDGET_CI_LEARN, BUDGET_IMPL_LEARN,
 )
 from autocoder.anticheat import audit_diff, protect_test_files, restore_test_files
@@ -20,8 +21,11 @@ from autocoder.epic import process_epic
 from autocoder.issues import analyze_and_prioritize, fetch_issues, fetch_issues_by_number, parse_sub_issues
 from autocoder.logger import RunLogger
 from autocoder.pr import comment_failure, create_pr, label_failed, mark_ready, merge_pr, wait_for_ci, wait_for_new_checks
-from autocoder.review import build_build_fix_prompt, build_ci_fix_prompt, build_fix_prompt, review_pr_diff
-from autocoder.sandbox import SandboxConfig, build_sandbox, build_plan_sandbox, build_claude_md_sandbox
+from autocoder.review import (
+    build_build_fix_prompt, build_ci_fix_prompt, build_fix_prompt,
+    merge_reviews, review_and_fix_multi, review_pr_diff, run_external_review,
+)
+from autocoder.sandbox import SandboxConfig, build_sandbox, build_plan_sandbox, build_claude_md_sandbox, build_review_sandbox
 from autocoder.testplan import (
     build_test_plan_fix_prompt,
     extract_acceptance_criteria,
@@ -30,10 +34,12 @@ from autocoder.testplan import (
 from autocoder.telemetry import FailureCategory, Phase, Telemetry
 from autocoder.types import (
     AgentError,
+    AgentResult,
     AntiCheatViolation,
     AuthenticationError,
     Outcome,
     RateLimitError,
+    ReviewResult,
     RunConfig,
     TestPlanResult,
     VerificationError,
@@ -59,6 +65,25 @@ def _fmt_dur(ms: int) -> str:
 class StepTiming:
     name: str
     duration_ms: int
+
+
+class StalemateTracker:
+    """Track consecutive iterations with no SHA change. Reports stalemate when threshold is hit."""
+
+    def __init__(self, threshold: int = 2) -> None:
+        self._threshold = threshold
+        self._streak = 0
+
+    def note(self, prev_sha: str, new_sha: str) -> bool:
+        if prev_sha == new_sha:
+            self._streak += 1
+        else:
+            self._streak = 0
+        return self._streak >= self._threshold
+
+    @property
+    def streak(self) -> int:
+        return self._streak
 
 
 class StepTimings:
@@ -115,6 +140,8 @@ def run(cfg: RunConfig) -> None:
     git = GitOps(cfg.repo_path)
     timings = StepTimings()
     telem = Telemetry()
+
+    set_rate_limit_wait(cfg.rate_limit_wait_seconds)
 
     # Startup — check clean BEFORE creating lockfile
     git.assert_clean()
@@ -276,7 +303,7 @@ def process_issue(
             if cfg.plan_mode and plan_sandbox:
                 # Phase 1: Plan (read-only)
                 with StepTimer(f"plan {tag} {att}", timings):
-                    plan_prompt = build_plan_prompt(issue)
+                    plan_prompt = build_plan_prompt(issue, cfg.repo_path)
                     max_budget = budget.remaining_for_issue_usd(cfg.plan_model)
                     plan_result = invoke_agent(
                         plan_prompt, cfg.repo_path, cfg.plan_model, cfg.effort, max_budget, plan_sandbox,
@@ -289,7 +316,7 @@ def process_issue(
                 plan_text = plan_result.result_text
 
                 # Phase 2: Implement with plan context
-                prompt = build_implement_prompt(issue, plan_text, error_context)
+                prompt = build_implement_prompt(issue, plan_text, error_context, cfg.repo_path)
             else:
                 prompt = build_prompt(
                     issue,
@@ -328,7 +355,7 @@ def process_issue(
                     # Stage 4a: Attempt focused build fix before giving up
                     print(f"  Build failed. Attempting fix...")
                     with StepTimer(f"build_fix {tag} {att}", timings):
-                        fix_prompt = build_build_fix_prompt(format_failure(failed), cfg.build_cmd or "")
+                        fix_prompt = build_build_fix_prompt(format_failure(failed), cfg.build_cmd or "", cfg.repo_path)
                         max_budget = budget.remaining_for_issue_usd(cfg.model)
                         fix_result = invoke_agent(
                             fix_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox,
@@ -368,7 +395,7 @@ def process_issue(
                         print(f"    - {item.criterion[:80]}")
 
                     with StepTimer(f"test_plan_fix {tag}", timings):
-                        fix_prompt = build_test_plan_fix_prompt(issue, failed_items)
+                        fix_prompt = build_test_plan_fix_prompt(issue, failed_items, cfg.repo_path)
                         max_budget = budget.remaining_for_issue_usd(cfg.model)
                         fix_result = invoke_agent(
                             fix_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox
@@ -398,7 +425,7 @@ def process_issue(
                         claude_md_path = Path(cfg.repo_path) / "CLAUDE.md"
                         existing_content = claude_md_path.read_text() if claude_md_path.exists() else None
                         diff_for_md = git.diff_full()
-                        md_prompt = build_update_claude_md_prompt(diff_for_md, existing_content)
+                        md_prompt = build_update_claude_md_prompt(diff_for_md, existing_content, cfg.repo_path)
                         md_sandbox = build_claude_md_sandbox(cfg)
                         md_budget = min(BUDGET_CLAUDE_MD, budget.remaining_for_issue_usd(cfg.model))
                         md_result = invoke_agent(
@@ -422,7 +449,7 @@ def process_issue(
                     verify_summary = "\n".join(
                         f"- {v.stage}: {'PASS' if v.passed else 'FAIL'}" for v in verify_results
                     )
-                    learn_prompt = build_impl_learn_prompt(impl_diff, verify_summary)
+                    learn_prompt = build_impl_learn_prompt(impl_diff, verify_summary, cfg.repo_path)
                     learn_sandbox = build_claude_md_sandbox(cfg)
                     learn_budget = min(BUDGET_IMPL_LEARN, budget.remaining_for_issue_usd(cfg.model))
                     learn_result = invoke_agent(
@@ -576,10 +603,17 @@ def _post_pr_review_and_merge(
     try:
         pre_fix_sha = git.save_checkpoint()
 
-        # Review the diff
+        # Route to multi-agent review if configured. The orchestrator fixes
+        # issues in-session, so we skip the separate fix-agent step below.
+        if cfg.review_mode == "multi":
+            return _multi_review_and_merge(
+                cfg, git, budget, issue, branch, pr_url, sandbox, telem, pre_fix_sha,
+            )
+
+        # Review the diff (primary + optional external, run in parallel)
         print("  Running code review...")
         diff = git.diff_full()
-        review = review_pr_diff(diff, cfg.repo_path, cfg.review_model)
+        review = _run_reviews_parallel(cfg, diff, telem)
         telem.record_review(review)
 
         if not review.has_actionable_issues:
@@ -592,7 +626,7 @@ def _post_pr_review_and_merge(
 
         # Fix issues
         print(f"  Fixing {len(review.findings)} review issue(s)...")
-        fix_prompt = build_fix_prompt(review.findings)
+        fix_prompt = build_fix_prompt(review.findings, cfg.repo_path)
         max_budget = budget.remaining_for_issue_usd(cfg.model)
         try:
             fix_result = invoke_agent(fix_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox)
@@ -629,6 +663,113 @@ def _post_pr_review_and_merge(
         return _do_merge(cfg, git, budget, issue, branch, pr_url, sandbox, telem)
 
 
+def _run_reviews_parallel(
+    cfg: RunConfig, diff: str, telem: Telemetry,
+) -> ReviewResult:
+    """Run primary claude review and optional external reviewer in parallel,
+    merge results. Returns merged ReviewResult."""
+    def _primary() -> ReviewResult:
+        return review_pr_diff(diff, cfg.repo_path, cfg.review_model)
+
+    def _external() -> ReviewResult | None:
+        if not cfg.external_reviewer_cmd:
+            return None
+        label = cfg.external_reviewer_cmd[0]
+        result, duration_ms = run_external_review(diff, cfg.external_reviewer_cmd, cfg.repo_path, label)
+        # Record a minimal AgentResult for telemetry (cost unknown for external tools)
+        telem.record_phase(Phase.REVIEW_EXTERNAL, AgentResult(
+            session_id="external", result_text=result.raw_response[:500],
+            is_error=False, duration_ms=duration_ms,
+            tokens_in=0, tokens_out=0, tokens_cached=0, cost_usd=0.0,
+            num_turns=1, model=label,
+        ))
+        return result
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        primary_fut = pool.submit(_primary)
+        external_fut = pool.submit(_external)
+        primary = primary_fut.result()
+        external = external_fut.result()
+
+    if external is not None and external.findings:
+        print(f"  External reviewer ({cfg.external_reviewer_cmd[0]}) added {len(external.findings)} finding(s).")
+        return merge_reviews(primary, external)
+    return primary
+
+
+def _multi_review_and_merge(
+    cfg: RunConfig,
+    git: GitOps,
+    budget: BudgetTracker,
+    issue,
+    branch: str,
+    pr_url: str,
+    sandbox: SandboxConfig,
+    telem: Telemetry,
+    pre_fix_sha: str,
+) -> str:
+    """Run the multi-agent orchestrator (fixes in-session), verify, push, merge."""
+    try:
+        print("  Running multi-agent code review (5 parallel reviewers)...")
+        review_sandbox = build_review_sandbox(cfg)
+        diff = git.diff_full()
+
+        # Optionally run external reviewer in parallel and pass its findings
+        # as context to the orchestrator.
+        external = None
+        if cfg.external_reviewer_cmd:
+            label = cfg.external_reviewer_cmd[0]
+            print(f"  External reviewer ({label}) running in parallel...")
+            external, ext_duration_ms = run_external_review(
+                diff, cfg.external_reviewer_cmd, cfg.repo_path, label,
+            )
+            telem.record_phase(Phase.REVIEW_EXTERNAL, AgentResult(
+                session_id="external", result_text=external.raw_response[:500],
+                is_error=False, duration_ms=ext_duration_ms,
+                tokens_in=0, tokens_out=0, tokens_cached=0, cost_usd=0.0,
+                num_turns=1, model=label,
+            ))
+
+        budget_cap = min(cfg.review_budget_usd, budget.remaining_for_issue_usd(cfg.review_model))
+        outcome, agent_result = review_and_fix_multi(
+            diff, cfg.repo_path, cfg.review_model, review_sandbox, budget_cap,
+            external=external,
+        )
+        budget.record(agent_result)
+        telem.record_phase(Phase.REVIEW_MULTI, agent_result)
+        print(f"  Review outcome: {outcome.summary}")
+
+        if outcome.failed:
+            telem.record_failure(FailureCategory.REVIEW_REJECTED)
+            return f"PR ready but review orchestrator reported unfixable issues: {pr_url}"
+
+        # If the orchestrator cleaned up, re-verify before merging
+        if git.get_head_sha() != pre_fix_sha:
+            print("  Re-verifying after orchestrator fixes...")
+            verify_results = run_verification(cfg)
+            telem.record_verify(verify_results)
+            if not all(v.passed for v in verify_results):
+                print("  Orchestrator fixes broke tests, reverting.")
+                git.rollback(pre_fix_sha)
+                git.push_branch(branch)
+                return _do_merge(cfg, git, budget, issue, branch, pr_url, sandbox, telem)
+
+            try:
+                git.commit_all(f"{commit_prefix(issue)}: address review feedback for #{issue.number}")
+            except RuntimeError:
+                # Orchestrator edited working tree but nothing was added/kept
+                pass
+            git.push_branch(branch)
+
+        return _do_merge(cfg, git, budget, issue, branch, pr_url, sandbox, telem)
+
+    except RateLimitError:
+        raise
+    except Exception as e:
+        print(f"  Multi-agent review error: {str(e)[:200]}")
+        return _do_merge(cfg, git, budget, issue, branch, pr_url, sandbox, telem)
+
+
 _CI_ATTEMPT_OUTPUT_MAX = 2000
 _CI_ATTEMPT_DIFF_MAX = 3000
 
@@ -655,7 +796,7 @@ def _run_ci_learn(
 ) -> None:
     """Persist CI fix learnings to the repo's CLAUDE.md (non-critical)."""
     try:
-        learn_prompt = build_ci_learn_prompt(ci_output, fix_diff)
+        learn_prompt = build_ci_learn_prompt(ci_output, fix_diff, cfg.repo_path)
         learn_sandbox = build_claude_md_sandbox(cfg)
         learn_budget = min(BUDGET_CI_LEARN, budget.remaining_for_issue_usd(cfg.model))
         learn_result = invoke_agent(
@@ -689,6 +830,8 @@ def _do_merge(
 
     fixes_pushed = 0
     ci_fix_context = ""  # Accumulate context between CI fix attempts
+    stalemate = StalemateTracker(cfg.stalemate_threshold)
+    last_sha = git.get_head_sha()
 
     for ci_attempt in range(1, cfg.max_retries + 1):
         print(f"  Waiting for CI checks (attempt {ci_attempt}, timeout {cfg.ci_timeout}s)...")
@@ -709,7 +852,7 @@ def _do_merge(
         print(f"  CI checks failed. Attempting fix ({ci_attempt}/{cfg.max_retries})...")
         telem.record_failure(FailureCategory.CI_FAIL)
 
-        fix_prompt = build_ci_fix_prompt(ci_result.output, previous_attempts=ci_fix_context)
+        fix_prompt = build_ci_fix_prompt(ci_result.output, previous_attempts=ci_fix_context, repo_path=cfg.repo_path)
         max_budget = budget.remaining_for_issue_usd(cfg.model)
 
         try:
@@ -739,11 +882,19 @@ def _do_merge(
             git.commit_all(f"{commit_prefix(issue)}: fix CI for #{issue.number}")
         except RuntimeError:
             print("  CI fix produced no code changes. Cannot fix CI automatically.")
+            telem.record_failure(FailureCategory.CI_STALEMATE)
             return f"PR ready but CI fix produced no changes: {pr_url}"
 
         # Capture what was changed for next attempt's context
         fix_diff = git.diff_last_commit_stats()
         ci_fix_context += _format_ci_attempt(ci_attempt, ci_result.output, fix_diff)
+
+        new_sha_after_commit = git.get_head_sha()
+        if stalemate.note(last_sha, new_sha_after_commit):
+            print(f"  CI fix stalemate: no SHA change in {cfg.stalemate_threshold} attempts. Stopping.")
+            telem.record_failure(FailureCategory.CI_STALEMATE)
+            return f"PR ready but CI fix stalemated: {pr_url}"
+        last_sha = new_sha_after_commit
 
         git.push_branch(branch)
         fixes_pushed += 1

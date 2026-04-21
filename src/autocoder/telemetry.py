@@ -12,6 +12,8 @@ class Phase(str, Enum):
     PLAN = "plan"
     IMPLEMENT = "implement"
     REVIEW_FIX = "review_fix"
+    REVIEW_MULTI = "review_multi"
+    REVIEW_EXTERNAL = "review_external"
     TESTPLAN_FIX = "testplan_fix"
     UPDATE_CLAUDE_MD = "update_claude_md"
     CI_FIX = "ci_fix"
@@ -24,6 +26,7 @@ class FailureCategory(str, Enum):
     TEST_FAIL = "test_fail"
     INTEGRATION_FAIL = "integration_fail"
     REVIEW_REJECTED = "review_rejected"
+    REVIEW_STALEMATE = "review_stalemate"
     TESTPLAN_FAIL = "testplan_fail"
     RATE_LIMIT = "rate_limit"
     AUTH_ERROR = "auth_error"
@@ -32,6 +35,7 @@ class FailureCategory(str, Enum):
     ANTICHEAT_VIOLATION = "anticheat_violation"
     TIMEOUT = "timeout"
     CI_FAIL = "ci_fail"
+    CI_STALEMATE = "ci_stalemate"
     CI_TIMEOUT = "ci_timeout"
 
 

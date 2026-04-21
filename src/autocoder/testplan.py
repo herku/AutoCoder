@@ -31,7 +31,7 @@ def verify_test_plan(
 
     truncated_diff = diff[:TESTPLAN_DIFF_MAX] if len(diff) > TESTPLAN_DIFF_MAX else diff
     criteria_list = "\n".join(f"{i+1}. {c}" for i, c in enumerate(criteria))
-    prompt = load("testplan").format(
+    prompt = load("testplan", repo_path).format(
         title=issue.title,
         body=issue.body[:4000],
         criteria_list=criteria_list,
@@ -85,13 +85,13 @@ def parse_test_plan_response(raw: str, criteria: list[str]) -> TestPlanResult:
     return TestPlanResult(items=items, raw_response=raw, all_passed=all_passed)
 
 
-def build_test_plan_fix_prompt(issue: Issue, failed_items: list[PlanCheckItem]) -> str:
+def build_test_plan_fix_prompt(issue: Issue, failed_items: list[PlanCheckItem], repo_path: str = "") -> str:
     """Build prompt for the agent to fix gaps in acceptance criteria."""
     gaps = "\n".join(
         f"- {item.criterion}\n  Evidence: {item.evidence}"
         for item in failed_items
     )
-    return load("testplan_fix").format(
+    return load("testplan_fix", repo_path or None).format(
         issue_number=issue.number,
         issue_title=issue.title,
         gaps=gaps,

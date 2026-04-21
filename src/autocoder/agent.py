@@ -54,7 +54,7 @@ def _error_block(ctx: str, message: str = "The previous attempt to fix this issu
 def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", triage_model: str = "", plan_mode: bool = False) -> str:
     body = truncate_body(issue.body, PROMPT_BODY_MAX)
     verb = action_verb(issue)
-    return load("implement").format(
+    return load("implement", repo_path or None).format(
         verb=verb,
         issue_number=issue.number,
         issue_title=issue.title,
@@ -63,21 +63,21 @@ def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", tri
     )
 
 
-def build_plan_prompt(issue: Issue) -> str:
+def build_plan_prompt(issue: Issue, repo_path: str = "") -> str:
     """Build a prompt for the planning phase (read-only analysis)."""
     body = truncate_body(issue.body, PROMPT_BODY_MAX)
-    return load("plan").format(
+    return load("plan", repo_path or None).format(
         issue_number=issue.number,
         issue_title=issue.title,
         body=body,
     )
 
 
-def build_implement_prompt(issue: Issue, plan_text: str, error_context: str = "") -> str:
+def build_implement_prompt(issue: Issue, plan_text: str, error_context: str = "", repo_path: str = "") -> str:
     """Build a prompt for the implementation phase, with plan as context."""
     body = truncate_body(issue.body, PROMPT_BODY_MAX)
     verb = action_verb(issue)
-    return load("implement_with_plan").format(
+    return load("implement_with_plan", repo_path or None).format(
         verb=verb,
         issue_number=issue.number,
         issue_title=issue.title,
@@ -94,18 +94,18 @@ CI_LEARN_DIFF_MAX = 5_000
 IMPL_LEARN_MAX = 5_000
 
 
-def build_ci_learn_prompt(ci_output: str, fix_diff: str) -> str:
+def build_ci_learn_prompt(ci_output: str, fix_diff: str, repo_path: str = "") -> str:
     """Build a prompt to capture CI fix learnings into the repo's CLAUDE.md."""
     truncated_ci = ci_output[:CI_LEARN_OUTPUT_MAX]
     truncated_diff = fix_diff[:CI_LEARN_DIFF_MAX]
-    return load("ci_learn").format(ci_output=truncated_ci, fix_diff=truncated_diff)
+    return load("ci_learn", repo_path or None).format(ci_output=truncated_ci, fix_diff=truncated_diff)
 
 
-def build_impl_learn_prompt(diff_stats: str, verify_summary: str) -> str:
+def build_impl_learn_prompt(diff_stats: str, verify_summary: str, repo_path: str = "") -> str:
     """Build a prompt to capture implementation learnings into the repo's CLAUDE.md."""
     truncated_stats = diff_stats[:IMPL_LEARN_MAX]
     truncated_verify = verify_summary[:IMPL_LEARN_MAX]
-    return load("impl_learn").format(diff_stats=truncated_stats, verify_summary=truncated_verify)
+    return load("impl_learn", repo_path or None).format(diff_stats=truncated_stats, verify_summary=truncated_verify)
 
 
 TIMEOUT_PLAN = 3600  # 60 minutes for plan phase (read-only analysis)
@@ -117,14 +117,24 @@ BUDGET_CLAUDE_MD = 2.00  # $2.00 max for doc update
 CLAUDE_MD_DIFF_MAX = 30_000
 
 
-def build_update_claude_md_prompt(diff: str, existing_claude_md: str | None) -> str:
+def build_update_claude_md_prompt(diff: str, existing_claude_md: str | None, repo_path: str = "") -> str:
     """Build a prompt for updating the repo's CLAUDE.md with architecture info."""
     truncated_diff = diff[:CLAUDE_MD_DIFF_MAX] if len(diff) > CLAUDE_MD_DIFF_MAX else diff
     md_content = existing_claude_md or "(No CLAUDE.md exists yet. Create one from scratch.)"
-    return load("update_claude_md").format(
+    return load("update_claude_md", repo_path or None).format(
         existing_claude_md=md_content,
         truncated_diff=truncated_diff,
     )
+
+
+_rate_limit_wait_seconds: int | None = None
+_RATE_LIMIT_MAX_RETRIES = 3
+
+
+def set_rate_limit_wait(seconds: int | None) -> None:
+    """Configure whether invoke_agent should sleep+retry on RateLimitError."""
+    global _rate_limit_wait_seconds
+    _rate_limit_wait_seconds = seconds
 
 
 def invoke_agent(
@@ -135,6 +145,29 @@ def invoke_agent(
     max_budget_usd: float,
     sandbox: SandboxConfig,
     timeout: int = TIMEOUT_IMPLEMENT,
+) -> AgentResult:
+    for attempt in range(_RATE_LIMIT_MAX_RETRIES + 1):
+        try:
+            return _invoke_once(prompt, repo_path, model, effort, max_budget_usd, sandbox, timeout)
+        except RateLimitError:
+            if _rate_limit_wait_seconds is None or attempt == _RATE_LIMIT_MAX_RETRIES:
+                raise
+            print(
+                f"  Rate limit hit — waiting {_rate_limit_wait_seconds}s before retry "
+                f"({attempt + 1}/{_RATE_LIMIT_MAX_RETRIES})...",
+                flush=True,
+            )
+            time.sleep(_rate_limit_wait_seconds)
+
+
+def _invoke_once(
+    prompt: str,
+    repo_path: str,
+    model: str,
+    effort: str,
+    max_budget_usd: float,
+    sandbox: SandboxConfig,
+    timeout: int,
 ) -> AgentResult:
     cmd = build_claude_cmd(model, effort, max_budget_usd, sandbox, repo_path)
 
