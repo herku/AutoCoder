@@ -129,7 +129,7 @@ def build_config(
     # Auto-detect build command if not explicitly provided
     if build_cmd is None:
         from autocoder.build import detect_build_cmd
-        build_cmd = detect_build_cmd(repo_path)
+        build_cmd = detect_build_cmd(repo_path, model)
 
     return RunConfig(
         repo_path=repo_path,

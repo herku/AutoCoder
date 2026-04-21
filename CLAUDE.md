@@ -19,6 +19,7 @@ cli.py          Click entry point, all CLI options
 config.py       RunConfig dataclass built once at startup; Docker image age checks
 loop.py         Main orchestration: fetch → prioritize → process issues
 agent.py        Invokes Claude Code CLI subprocess, parses JSON, detects rate-limit/auth errors
+build.py        AI-powered build command detection (claude -p) with heuristic fallback
 sandbox.py      SandboxConfig: scoped allowed tools for Claude agent
 issues.py       GitHub CLI wrapper: fetch/parse issues, extract acceptance criteria, priority caching
 review.py       Code review phase on PR diffs
@@ -57,6 +58,7 @@ Templates live in `src/autocoder/prompts/*.md`, loaded via `prompts.load(name)`.
 - `review.md` / `review_fix.md` — code review prompts
 - `testplan.md` / `testplan_fix.md` — acceptance criteria verification
 - `prioritize.md` — issue triage (P0-P3)
+- `detect_build.md` — AI-powered build command detection
 - `update_claude_md.md` — architecture documentation update
 
 ## Key CLI Options

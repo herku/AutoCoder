@@ -80,6 +80,19 @@ def build_claude_md_sandbox(cfg: RunConfig) -> SandboxConfig:
     return SandboxConfig(allowed_tools=tools, docker=cfg.docker)
 
 
+def build_detect_sandbox(cfg: RunConfig) -> SandboxConfig:
+    """Build a read-only sandbox for AI build command detection."""
+    tools: list[str] = [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash(git diff:*)",
+        "Bash(git status:*)",
+        "Bash(git log:*)",
+    ]
+    return SandboxConfig(allowed_tools=tools, docker=cfg.docker)
+
+
 def build_claude_cmd(
     model: str,
     effort: str,
