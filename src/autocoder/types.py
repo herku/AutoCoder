@@ -91,6 +91,10 @@ class RunConfig:
     review_mode: str = "single"
     review_budget_usd: float = 2.00
     external_reviewer_cmd: Optional[list[str]] = None
+    implement_brief: bool = True
+    brief_budget_usd: float = 1.00
+    pre_verify_critique: bool = True
+    pre_verify_budget_usd: float = 1.50
 
 
 @dataclass

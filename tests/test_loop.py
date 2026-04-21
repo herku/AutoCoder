@@ -1,4 +1,5 @@
 from autocoder.loop import StalemateTracker
+from autocoder.telemetry import Phase
 
 
 def test_stalemate_not_triggered_on_change():
@@ -31,3 +32,9 @@ def test_stalemate_default_threshold_is_two():
     t = StalemateTracker()
     assert not t.note("a", "a")
     assert t.note("a", "a")
+
+
+def test_new_phases_registered():
+    # Plan 2 adds two new phase telemetry slots
+    assert Phase.IMPLEMENT_BRIEF.value == "implement_brief"
+    assert Phase.PRE_VERIFY_CRITIQUE.value == "pre_verify_critique"

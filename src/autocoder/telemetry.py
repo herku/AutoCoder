@@ -10,7 +10,9 @@ from autocoder.types import AgentResult, ReviewResult, TestPlanResult, VerifyRes
 
 class Phase(str, Enum):
     PLAN = "plan"
+    IMPLEMENT_BRIEF = "implement_brief"
     IMPLEMENT = "implement"
+    PRE_VERIFY_CRITIQUE = "pre_verify_critique"
     REVIEW_FIX = "review_fix"
     REVIEW_MULTI = "review_multi"
     REVIEW_EXTERNAL = "review_external"

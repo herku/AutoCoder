@@ -65,6 +65,10 @@ def build_config(
     review_mode: str = "single",
     review_budget_usd: float = 2.00,
     external_reviewer: str | None = None,
+    implement_brief: bool = True,
+    brief_budget_usd: float = 1.00,
+    pre_verify_critique: bool = True,
+    pre_verify_budget_usd: float = 1.50,
 ) -> RunConfig:
     repo_path = str(Path(repo).resolve())
 
@@ -192,4 +196,8 @@ def build_config(
         review_mode=review_mode,
         review_budget_usd=review_budget_usd,
         external_reviewer_cmd=shlex.split(external_reviewer) if external_reviewer else None,
+        implement_brief=implement_brief,
+        brief_budget_usd=brief_budget_usd,
+        pre_verify_critique=pre_verify_critique,
+        pre_verify_budget_usd=pre_verify_budget_usd,
     )

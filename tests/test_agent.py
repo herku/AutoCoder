@@ -4,7 +4,15 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from autocoder import agent
-from autocoder.agent import build_prompt, _parse_agent_output, invoke_agent, set_rate_limit_wait
+from autocoder.agent import (
+    build_brief_prompt,
+    build_implement_prompt,
+    build_prompt,
+    _parse_agent_output,
+    generate_implement_brief,
+    invoke_agent,
+    set_rate_limit_wait,
+)
 from autocoder.sandbox import SandboxConfig
 from autocoder.types import AgentResult, Issue, Priority, RateLimitError
 
@@ -126,3 +134,59 @@ def test_invoke_agent_wait_caps_at_three_retries(_reset_wait):
             invoke_agent("prompt", "/tmp", "sonnet", "max", 1.0, _sbx())
     # 3 sleeps = retry #1, #2, #3; 4th attempt raises out without sleeping
     assert sleep.call_count == 3
+
+
+# ---------- pre-implement brief ----------
+
+
+def test_build_brief_prompt_has_placeholders_filled():
+    prompt = build_brief_prompt(_make_issue())
+    assert "#42" in prompt
+    assert "Fix widget crash" in prompt
+    assert "widget crashes on save" in prompt
+    # Agent markers should have been expanded by the loader
+    assert "{{agent:architecture}}" not in prompt
+    assert "{{agent:tests}}" not in prompt
+    assert "{{agent:risks}}" not in prompt
+    # Expanded content keywords
+    assert "architecture" in prompt.lower()
+    assert "test" in prompt.lower()
+    assert "risk" in prompt.lower()
+
+
+def test_build_prompt_with_brief_appends_block():
+    prompt = build_prompt(_make_issue(), brief="- Touch foo.py\n- Add test for empty input")
+    assert "Design brief from advisory agents:" in prompt
+    assert "Touch foo.py" in prompt
+    assert "Add test for empty input" in prompt
+
+
+def test_build_prompt_without_brief_omits_block():
+    prompt = build_prompt(_make_issue())
+    assert "Design brief from advisory agents" not in prompt
+
+
+def test_build_implement_prompt_with_brief():
+    prompt = build_implement_prompt(
+        _make_issue(), plan_text="plan goes here", brief="- Brief item one",
+    )
+    assert "plan goes here" in prompt
+    assert "Design brief from advisory agents:" in prompt
+    assert "Brief item one" in prompt
+
+
+def test_generate_implement_brief_calls_invoke_agent():
+    brief_text = "## Architecture\n- change foo.py\n## Tests to add\n- case 1"
+    mock_result = AgentResult(
+        session_id="brief", result_text=brief_text, is_error=False, duration_ms=100,
+        tokens_in=1000, tokens_out=500, tokens_cached=0, cost_usd=0.02, num_turns=3, model="sonnet",
+    )
+    with patch("autocoder.agent.invoke_agent", return_value=mock_result) as mock_invoke:
+        result = generate_implement_brief(
+            _make_issue(), "/tmp", "sonnet", "max", 1.0, _sbx(),
+        )
+    assert result.result_text == brief_text
+    mock_invoke.assert_called_once()
+    # The prompt arg should include the issue title
+    call_prompt = mock_invoke.call_args[0][0]
+    assert "Fix widget crash" in call_prompt

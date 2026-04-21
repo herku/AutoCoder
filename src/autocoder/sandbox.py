@@ -96,6 +96,24 @@ def build_review_sandbox(cfg: RunConfig) -> SandboxConfig:
     return SandboxConfig(allowed_tools=tools, docker=base.docker)
 
 
+def build_brief_sandbox(cfg: RunConfig) -> SandboxConfig:
+    """Build a read-only sandbox for the pre-implement brief orchestrator.
+
+    Needs Read/Glob/Grep + Task to spawn parallel advisors, plus git history
+    commands. No write tools — the brief phase produces text, not code.
+    """
+    tools: list[str] = [
+        "Read",
+        "Glob",
+        "Grep",
+        "Task",
+        "Bash(git diff:*)",
+        "Bash(git status:*)",
+        "Bash(git log:*)",
+    ]
+    return SandboxConfig(allowed_tools=tools, docker=cfg.docker)
+
+
 def build_detect_sandbox(cfg: RunConfig) -> SandboxConfig:
     """Build a read-only sandbox for AI build command detection."""
     tools: list[str] = [

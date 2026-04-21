@@ -71,6 +71,28 @@ from autocoder.loop import run
     default=None,
     help="Second-opinion reviewer command; prompt is piped on stdin. Example: 'codex -p --model gpt-5' or 'claude -p --model claude-opus-4-6 --output-format text'.",
 )
+@click.option(
+    "--implement-brief/--no-implement-brief",
+    default=True,
+    help="Before each implement phase, spawn 3 parallel advisors (architecture/tests/risks) to generate a design brief prepended to the implementer's prompt. Default: on.",
+)
+@click.option(
+    "--brief-budget-usd",
+    default=1.00,
+    type=float,
+    help="Budget cap for the pre-implement brief orchestrator (default $1.00).",
+)
+@click.option(
+    "--pre-verify-critique/--no-pre-verify-critique",
+    default=True,
+    help="After each implement phase and before verification, run multi-agent critique to catch obvious defects. Reuses the review_multi orchestrator. Default: on.",
+)
+@click.option(
+    "--pre-verify-budget-usd",
+    default=1.50,
+    type=float,
+    help="Budget cap for the pre-verify critique orchestrator (default $1.50).",
+)
 def main(**kwargs: object) -> None:
     """AutoCoder: Autonomous AI coding agent loop.
 

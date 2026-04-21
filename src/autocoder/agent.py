@@ -51,16 +51,23 @@ def _error_block(ctx: str, message: str = "The previous attempt to fix this issu
     )
 
 
-def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", triage_model: str = "", plan_mode: bool = False) -> str:
+def _brief_block(brief: str) -> str:
+    if not brief:
+        return ""
+    return f"\n\nDesign brief from advisory agents:\n{brief}\n"
+
+
+def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", triage_model: str = "", plan_mode: bool = False, brief: str = "") -> str:
     body = truncate_body(issue.body, PROMPT_BODY_MAX)
     verb = action_verb(issue)
-    return load("implement", repo_path or None).format(
+    base = load("implement", repo_path or None).format(
         verb=verb,
         issue_number=issue.number,
         issue_title=issue.title,
         body=body,
         error_context_block=_error_block(error_context),
     )
+    return base + _brief_block(brief)
 
 
 def build_plan_prompt(issue: Issue, repo_path: str = "") -> str:
@@ -73,11 +80,11 @@ def build_plan_prompt(issue: Issue, repo_path: str = "") -> str:
     )
 
 
-def build_implement_prompt(issue: Issue, plan_text: str, error_context: str = "", repo_path: str = "") -> str:
+def build_implement_prompt(issue: Issue, plan_text: str, error_context: str = "", repo_path: str = "", brief: str = "") -> str:
     """Build a prompt for the implementation phase, with plan as context."""
     body = truncate_body(issue.body, PROMPT_BODY_MAX)
     verb = action_verb(issue)
-    return load("implement_with_plan", repo_path or None).format(
+    base = load("implement_with_plan", repo_path or None).format(
         verb=verb,
         issue_number=issue.number,
         issue_title=issue.title,
@@ -85,6 +92,7 @@ def build_implement_prompt(issue: Issue, plan_text: str, error_context: str = ""
         plan_text=plan_text,
         error_context_block=_error_block(error_context, "The previous attempt failed with these errors."),
     )
+    return base + _brief_block(brief)
 
 
 BUDGET_CI_LEARN = 1.00  # $1.00 max for CI learning step
@@ -112,9 +120,38 @@ TIMEOUT_PLAN = 3600  # 60 minutes for plan phase (read-only analysis)
 TIMEOUT_IMPLEMENT = 6000  # 100 minutes for implementation phase
 TIMEOUT_BUILD_FIX = 300  # 5 minutes for build fix attempt
 TIMEOUT_CLAUDE_MD = 600  # 10 minutes for CLAUDE.md update
+TIMEOUT_BRIEF = 600  # 10 minutes for pre-implement brief (3 parallel advisors)
 BUDGET_CLAUDE_MD = 2.00  # $2.00 max for doc update
 
+
+def build_brief_prompt(issue: Issue, repo_path: str = "") -> str:
+    """Build the orchestrator prompt for the pre-implement design brief."""
+    body = truncate_body(issue.body, PROMPT_BODY_MAX)
+    return load("implement_brief", repo_path or None).format(
+        issue_number=issue.number,
+        issue_title=issue.title,
+        body=body,
+    )
+
 CLAUDE_MD_DIFF_MAX = 30_000
+
+
+def generate_implement_brief(
+    issue: Issue,
+    repo_path: str,
+    model: str,
+    effort: str,
+    max_budget_usd: float,
+    sandbox: SandboxConfig,
+) -> AgentResult:
+    """Run the pre-implement brief orchestrator; returns AgentResult whose
+    result_text is the synthesized design brief to prepend to the implementer's
+    prompt."""
+    prompt = build_brief_prompt(issue, repo_path)
+    return invoke_agent(
+        prompt, repo_path, model, effort, max_budget_usd, sandbox,
+        timeout=TIMEOUT_BRIEF,
+    )
 
 
 def build_update_claude_md_prompt(diff: str, existing_claude_md: str | None, repo_path: str = "") -> str:

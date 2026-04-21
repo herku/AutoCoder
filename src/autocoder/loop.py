@@ -11,6 +11,7 @@ from pathlib import Path
 from autocoder.agent import (
     build_prompt, build_plan_prompt, build_implement_prompt,
     build_update_claude_md_prompt, build_ci_learn_prompt, build_impl_learn_prompt,
+    generate_implement_brief,
     invoke_agent, set_rate_limit_wait, TIMEOUT_PLAN, TIMEOUT_IMPLEMENT, TIMEOUT_BUILD_FIX,
     TIMEOUT_CLAUDE_MD, BUDGET_CLAUDE_MD, BUDGET_CI_LEARN, BUDGET_IMPL_LEARN,
 )
@@ -25,7 +26,7 @@ from autocoder.review import (
     build_build_fix_prompt, build_ci_fix_prompt, build_fix_prompt,
     merge_reviews, review_and_fix_multi, review_pr_diff, run_external_review,
 )
-from autocoder.sandbox import SandboxConfig, build_sandbox, build_plan_sandbox, build_claude_md_sandbox, build_review_sandbox
+from autocoder.sandbox import SandboxConfig, build_sandbox, build_brief_sandbox, build_plan_sandbox, build_claude_md_sandbox, build_review_sandbox
 from autocoder.testplan import (
     build_test_plan_fix_prompt,
     extract_acceptance_criteria,
@@ -300,6 +301,25 @@ def process_issue(
             # Stage 3: Agent execution
             print(f"  Attempt {attempt}/{cfg.max_retries}: Running agent...")
 
+            # Stage 3a (optional): pre-implement design brief
+            brief_text = ""
+            if cfg.implement_brief:
+                with StepTimer(f"brief {tag} {att}", timings):
+                    brief_sandbox = build_brief_sandbox(cfg)
+                    brief_budget = min(
+                        cfg.brief_budget_usd, budget.remaining_for_issue_usd(cfg.model),
+                    )
+                    brief_result = generate_implement_brief(
+                        issue, cfg.repo_path, cfg.model, cfg.effort,
+                        brief_budget, brief_sandbox,
+                    )
+                budget.record(brief_result)
+                telem.record_phase(Phase.IMPLEMENT_BRIEF, brief_result)
+                if brief_result.is_error:
+                    print(f"  Brief generation failed, continuing without brief: {brief_result.result_text[:100]}")
+                else:
+                    brief_text = brief_result.result_text
+
             if cfg.plan_mode and plan_sandbox:
                 # Phase 1: Plan (read-only)
                 with StepTimer(f"plan {tag} {att}", timings):
@@ -315,13 +335,16 @@ def process_issue(
                     raise AgentError(plan_result.result_text)
                 plan_text = plan_result.result_text
 
-                # Phase 2: Implement with plan context
-                prompt = build_implement_prompt(issue, plan_text, error_context, cfg.repo_path)
+                # Phase 2: Implement with plan context (+ brief if present)
+                prompt = build_implement_prompt(
+                    issue, plan_text, error_context, cfg.repo_path, brief=brief_text,
+                )
             else:
                 prompt = build_prompt(
                     issue,
                     error_context=error_context,
                     repo_path=cfg.repo_path,
+                    brief=brief_text,
                 )
 
             with StepTimer(f"agent {tag} {att}", timings):
@@ -342,6 +365,27 @@ def process_issue(
             if cfg.protect_tests:
                 with StepTimer(f"anticheat {tag}", timings):
                     audit_diff(cfg.repo_path, cfg.test_patterns)
+
+            # Stage 3.5 (optional): pre-verify critique (multi-agent shift-left review)
+            if cfg.pre_verify_critique:
+                with StepTimer(f"pre_verify_critique {tag} {att}", timings):
+                    diff_for_critique = git.diff_full()
+                    critique_sandbox = build_review_sandbox(cfg)
+                    critique_budget = min(
+                        cfg.pre_verify_budget_usd, budget.remaining_for_issue_usd(cfg.model),
+                    )
+                    critique_outcome, critique_result = review_and_fix_multi(
+                        diff_for_critique, cfg.repo_path, cfg.model,
+                        critique_sandbox, critique_budget,
+                    )
+                budget.record(critique_result)
+                telem.record_phase(Phase.PRE_VERIFY_CRITIQUE, critique_result)
+                print(f"  Pre-verify critique: {critique_outcome.summary}")
+                if critique_outcome.failed:
+                    error_context = (
+                        f"Pre-verify critique reported unfixable issues: {critique_outcome.summary}"
+                    )
+                    raise VerificationError("pre_verify_critique", error_context)
 
             # Stage 4: Verification
             print(f"  Running verification...")
