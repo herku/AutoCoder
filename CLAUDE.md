@@ -1,6 +1,6 @@
 # AutoCoder
 
-Autonomous AI coding agent that resolves GitHub issues end-to-end: fetch, prioritize, branch, implement, verify, PR, review, merge.
+Autonomous AI coding agent that resolves GitHub issues end-to-end: fetch, prioritize, branch, brief, implement, critique, verify, PR, review, merge.
 
 ## Setup
 
@@ -16,68 +16,107 @@ Requires: Claude Code CLI + GitHub CLI, both authenticated.
 
 ```
 cli.py          Click entry point, all CLI options
-config.py       RunConfig dataclass built once at startup; Docker image age checks
-loop.py         Main orchestration: fetch → prioritize → process issues
-agent.py        Invokes Claude Code CLI subprocess, parses JSON, detects rate-limit/auth errors
+config.py       RunConfig builder; Docker image age checks; duration parsing; external-reviewer preset resolution
+loop.py         Main orchestration: fetch → prioritize → brief → implement → critique → verify → PR → review/merge; StalemateTracker
+agent.py        Invokes Claude Code CLI subprocess; rate-limit/auth detection; rate-limit wait+retry; brief/learn prompt builders
 build.py        AI-powered build command detection (claude -p) with heuristic fallback
-sandbox.py      SandboxConfig: scoped allowed tools for Claude agent
+sandbox.py      SandboxConfig: per-phase scoped allowed tools (implement/plan/brief/review/claude_md/detect)
 issues.py       GitHub CLI wrapper: fetch/parse issues, extract acceptance criteria, priority caching
-review.py       Code review phase on PR diffs
+review.py       Single-reviewer + multi-agent orchestrator; external-reviewer subprocess; fix/ci_fix/build_fix prompt builders
 testplan.py     Acceptance criteria verification against diff
-verify.py       Runs lint/unit/integration tests (stops on first failure)
+verify.py       Runs lint/unit/integration/build tests (stops on first failure)
 budget.py       Token & cost tracking (per-issue + daily cap)
 git.py          GitOps class: branching, commit, diff, rollback, merge, lockfile
 anticheat.py    Protect-tests mode: read-only test files, audit violations
 logger.py       JSONL logging + dead-letter queue for failures
-telemetry.py    Per-phase cost/token tracking and failure categorization
+telemetry.py    Per-phase cost/token tracking; Phase enum incl. IMPLEMENT_BRIEF, PRE_VERIFY_CRITIQUE, REVIEW_MULTI, REVIEW_EXTERNAL
 epic.py         Epic/meta-issue support: process sub-issues, track progress, close parent
-types.py        Dataclasses: Issue, AgentResult, VerifyResult, RunConfig, EpicResult, exceptions
-prompts/        Markdown templates loaded via prompts.load(name)
+pr.py           PR creation, readiness, CI wait, merge
+types.py        Dataclasses: Issue, AgentResult, VerifyResult, RunConfig, ReviewResult, MultiReviewResult, EpicResult, exceptions
+prompts/        Markdown templates loaded via prompts.load(name, repo_path); supports repo overrides + {{agent:X}} expansion
+prompts/agents/ Role briefs for brief advisors (architecture/tests/risks) and review agents (quality/implementation/testing/simplification/documentation)
 ```
 
 ## Pipeline Phases (per issue)
 
 1. Branch creation: `feat/{num}-{slug}` from main
 2. Plan phase (optional `--plan-mode`): read-only analysis
-3. Implement phase: agent writes code with scoped permissions
-4. Anti-cheat audit (if `--protect-tests`): reject if test files modified
-5. Verification: lint -> unit -> integration -> build (stop on first failure)
-5a. Build fix (if build fails): focused agent fixes build errors, then re-verifies
-6. Test plan verification: check acceptance criteria checkboxes against diff
-7. CLAUDE.md update (if `--update-claude-md`): auto-document architecture changes
-8. PR creation: draft PR with summary, diff stats, test results
-9. Review & merge (if `--auto-merge`): review -> fix -> re-verify -> squash-merge
+3. Pre-implement brief (default on, `--no-implement-brief` to disable): orchestrator spawns 3 parallel advisors (architecture/tests/risks), synthesizes a compact design brief prepended to implementer prompt
+4. Implement phase: agent writes code with scoped permissions
+5. Anti-cheat audit (if `--protect-tests`): reject if test files modified
+6. Pre-verify critique (default on, `--no-pre-verify-critique` to disable): multi-agent shift-left review on staged diff; fixes in-session or raises VerificationError on unfixable findings
+7. Verification: lint -> unit -> integration -> build (stop on first failure)
+   7a. Build fix (if build fails): focused agent fixes build errors; re-verify; separate `--build-retries` budget
+8. Test plan verification: check acceptance criteria checkboxes against diff; fix + re-verify if any fail
+9. CLAUDE.md update (if `--update-claude-md`): auto-document architecture changes
+10. Implementation learning: capture post-implementation insights into repo CLAUDE.md
+11. PR creation: draft PR with summary, diff stats, test results
+12. Review & merge (if `--auto-merge`):
+    - `--review-mode single` (default): primary review + optional external reviewer (parallel, findings merged), fix agent, re-verify, push
+    - `--review-mode multi`: multi-agent orchestrator with 5 parallel reviewers that fix in-session; signal line parsed (REVIEW_DONE/REVIEW_FIXED/REVIEW_FAILED)
+13. CI watch + auto-fix: on CI failure, build_ci_fix prompt with accumulated prior-attempt context; re-verify locally; push; stalemate detection on consecutive no-change SHAs; CI learning saved to CLAUDE.md
 
 Retry loop: on failure, feed error context back, retry up to `--max-retries` (default 3). After exhaustion: label `auto-fix-failed`, comment reason, log to dead-letter queue.
 
 ## Prompts System
 
-Templates live in `src/autocoder/prompts/*.md`, loaded via `prompts.load(name)`. Each template uses `str.format()` placeholders:
+Templates live in `src/autocoder/prompts/*.md`. Loaded via `prompts.load(name, repo_path)`:
 
-- `implement.md` / `implement_with_plan.md` — coding prompts
+- **Repo overrides**: `{repo}/.autocoder/prompts/<name>.md` wins over the packaged default. Same for `{repo}/.autocoder/prompts/agents/<name>.md`.
+- **Agent expansion**: `{{agent:X}}` markers are replaced with the content of `agents/X.md` (braces in expanded content are doubled so later `str.format()` calls leave them alone).
+- **Caching**: `@lru_cache` on `load()`.
+
+Templates:
+
+- `implement.md` / `implement_with_plan.md` — coding prompts (brief prepended at call site)
+- `implement_brief.md` — pre-implement orchestrator (spawns 3 advisors)
 - `plan.md` — read-only analysis prompt
-- `review.md` / `review_fix.md` — code review prompts
+- `review.md` / `review_fix.md` — single-reviewer prompts
+- `review_multi.md` — multi-agent review orchestrator (5 parallel reviewers, fix in-session)
 - `testplan.md` / `testplan_fix.md` — acceptance criteria verification
 - `prioritize.md` — issue triage (P0-P3)
 - `detect_build.md` — AI-powered build command detection
 - `build_fix.md` — focused build failure fix
+- `ci_fix.md` — CI failure fix with accumulated prior-attempt context
+- `ci_learn.md` / `impl_learn.md` — persist tribal knowledge to repo CLAUDE.md
 - `update_claude_md.md` — architecture documentation update
+- `agents/architecture.md`, `agents/tests.md`, `agents/risks.md` — brief advisors
+- `agents/quality.md`, `agents/implementation.md`, `agents/testing.md`, `agents/simplification.md`, `agents/documentation.md` — review role briefs
 
 ## Key CLI Options
 
-`--model` (default `claude-sonnet-4-6`), `--plan-model`, `--review-model`, `--implement-model` for per-phase model selection. `--effort`, `--max-issues`, `--token-budget`, `--daily-cap`, `--auto-merge`, `--docker`, `--update-docker`, `--docker-max-age-days` (default 7), `--protect-tests`, `--dry-run`, `--issue` (single issue mode), `--update-claude-md`.
+**Models**: `--model` (default `claude-sonnet-4-6`), `--plan-model`, `--review-model`, `--triage-model`.
+
+**Budgets**: `--token-budget`, `--daily-cap`, `--brief-budget-usd` (1.00), `--pre-verify-budget-usd` (1.50), `--review-budget-usd` (2.00).
+
+**Retries/timeouts**: `--max-retries` (3), `--build-retries` (1), `--ci-timeout` (1800), `--stalemate-threshold` (2), `--wait-on-rate-limit` (e.g. `30s`, `5m`, `1h`; default: abort).
+
+**Phases**: `--plan-mode`, `--implement-brief`/`--no-implement-brief`, `--pre-verify-critique`/`--no-pre-verify-critique`, `--auto-merge`, `--update-claude-md`/`--no-update-claude-md`.
+
+**Review**: `--review-mode {single,multi}`, `--external-reviewer` (preset name `codex`/`gemini`/`claude`, or full shell command — prompt piped on stdin).
+
+**Sandbox**: `--docker`, `--update-docker`, `--docker-max-age-days` (7), `--protect-tests`, `--test-patterns`.
+
+**Scope**: `--issue` (multi, single-issue mode), `--labels`, `--max-issues` (10), `--max-analyze` (0=unlimited), `--dry-run`.
 
 ## Key Patterns
 
-- **Config**: single `RunConfig` passed through entire pipeline
-- **Sandbox**: `SandboxConfig` restricts Claude's allowed tools (Read/Edit/Write/Glob/Grep always; git/test/lint optional)
-- **Cost control**: per-issue `--max-budget-usd` via Claude CLI, daily cap stops processing
-- **Epics**: meta-issues with sub-issue lists are auto-expanded; sub-issues processed individually, parent closed when all succeed
-- **Telemetry**: per-phase cost/token tracking, failure categorization (lint/test/review/rate-limit/etc.)
-- **Priority caching**: previously triaged issues skip redundant AI prioritization
-- **Docker freshness**: images auto-rebuild after `--docker-max-age-days` (default 7); `--update-docker` forces immediate rebuild with `--no-cache`
-- **Error detection**: rate-limit and auth-error pattern matching aborts immediately
-- **Logging**: `logs/` directory, JSONL records per run, `failed_issues.jsonl` dead-letter queue
+- **Config**: single `RunConfig` passed through entire pipeline; built once in `config.build_config`
+- **Per-phase sandboxes**: `build_sandbox` (implement: full write + build/test/lint), `build_plan_sandbox` (read-only), `build_brief_sandbox` (read-only + Task), `build_review_sandbox` (implement + Task), `build_claude_md_sandbox` (narrow write for docs), `build_detect_sandbox` (read-only)
+- **Task tool**: multi-agent orchestrators (brief, multi-review) spawn parallel sub-agents via Claude Code's `Task` tool in a single assistant turn
+- **Signal parsing**: multi-agent review returns `REVIEW_DONE` / `REVIEW_FIXED` / `REVIEW_FAILED: <reason>` on final line; anything else treated as ambiguous failure
+- **Rate-limit handling**: `set_rate_limit_wait(seconds)` configures `invoke_agent` to sleep+retry (up to 3 times); if unset, RateLimitError propagates and stops the run
+- **Stalemate detection**: `StalemateTracker` in loop.py; CI-fix and multi-review loops abort after N consecutive no-SHA-change iterations; categorized as `CI_STALEMATE`
+- **External reviewer**: preset shortcuts (`codex`, `gemini`, `claude`) expand to canonical commands via `EXTERNAL_REVIEWER_PRESETS`; anything else is shlex-split; runs in parallel with primary review; findings unioned with dedup on `(file, description[:80].lower())`
+- **Cost control**: per-issue `--max-budget-usd` passed to Claude CLI; daily cap stops processing; per-phase `--brief-budget-usd`/`--pre-verify-budget-usd`/`--review-budget-usd` cap orchestrator spend
+- **Epics**: meta/tracking/epic-labeled issues auto-expanded; sub-issues processed individually, parent closed when all succeed
+- **Telemetry**: per-phase `Phase` enum (PLAN, IMPLEMENT_BRIEF, IMPLEMENT, PRE_VERIFY_CRITIQUE, REVIEW_FIX, REVIEW_MULTI, REVIEW_EXTERNAL, TESTPLAN_FIX, UPDATE_CLAUDE_MD, CI_FIX, BUILD_FIX); `FailureCategory` drives top-failure reasons
+- **Priority caching**: previously triaged issues skip redundant AI prioritization (`--force-prioritize` to bypass)
+- **Docker freshness**: images auto-rebuild after `--docker-max-age-days`; `--update-docker` forces `--no-cache` rebuild
+- **Learning loops**: `impl_learn.md` runs after every success; `ci_learn.md` runs after each CI fix push — both write to the target repo's CLAUDE.md to persist tribal knowledge
+- **Error detection**: rate-limit and auth-error pattern matching; rate-limit can wait+retry, auth-error always aborts
+- **Pre-flight**: build command runs on `main` before any issue processing; aborts if main is broken
+- **Logging**: `logs/` JSONL records per run; `failed_issues.jsonl` dead-letter queue
 
 ## Testing
 
@@ -85,4 +124,4 @@ Templates live in `src/autocoder/prompts/*.md`, loaded via `prompts.load(name)`.
 uv run pytest
 ```
 
-Tests cover: agent output parsing, git operations, anti-cheat audit, verification logic.
+Tests cover: agent output parsing, build detection, config/duration/preset resolution, git operations, anti-cheat audit, verification logic, prompt loading + agent expansion + repo overrides, review parsing + merge + multi-agent signal, loop stalemate.
