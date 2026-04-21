@@ -27,6 +27,23 @@ def parse_duration(value: str | None) -> int | None:
     return num * multiplier
 
 
+EXTERNAL_REVIEWER_PRESETS: dict[str, list[str]] = {
+    "codex":  ["codex", "exec"],
+    "gemini": ["gemini"],
+    "claude": ["claude", "-p", "--output-format", "text"],
+}
+
+
+def resolve_external_reviewer(raw: str | None) -> list[str] | None:
+    """Resolve --external-reviewer: expand a bare preset name, else shlex-split as-is."""
+    if not raw:
+        return None
+    tokens = shlex.split(raw)
+    if len(tokens) == 1 and tokens[0] in EXTERNAL_REVIEWER_PRESETS:
+        return list(EXTERNAL_REVIEWER_PRESETS[tokens[0]])
+    return tokens
+
+
 def build_config(
     repo: str,
     labels: str | None,
@@ -195,7 +212,7 @@ def build_config(
         stalemate_threshold=stalemate_threshold,
         review_mode=review_mode,
         review_budget_usd=review_budget_usd,
-        external_reviewer_cmd=shlex.split(external_reviewer) if external_reviewer else None,
+        external_reviewer_cmd=resolve_external_reviewer(external_reviewer),
         implement_brief=implement_brief,
         brief_budget_usd=brief_budget_usd,
         pre_verify_critique=pre_verify_critique,

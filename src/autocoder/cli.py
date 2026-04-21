@@ -69,7 +69,7 @@ from autocoder.loop import run
 @click.option(
     "--external-reviewer",
     default=None,
-    help="Second-opinion reviewer command; prompt is piped on stdin. Example: 'codex -p --model gpt-5' or 'claude -p --model claude-opus-4-6 --output-format text'.",
+    help="Second-opinion reviewer. Pass a preset name ('codex', 'gemini', 'claude') or a full shell command; prompt is piped on stdin. Examples: 'codex', 'codex exec -m gpt-5', 'claude -p --model claude-opus-4-6 --output-format text'.",
 )
 @click.option(
     "--implement-brief/--no-implement-brief",

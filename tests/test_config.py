@@ -1,6 +1,6 @@
 import pytest
 
-from autocoder.config import parse_duration
+from autocoder.config import parse_duration, resolve_external_reviewer
 
 
 def test_parse_duration_none():
@@ -33,3 +33,25 @@ def test_parse_duration_invalid():
         parse_duration("garbage")
     with pytest.raises(SystemExit):
         parse_duration("5d")  # day suffix not supported
+
+
+def test_resolve_external_reviewer_none():
+    assert resolve_external_reviewer(None) is None
+    assert resolve_external_reviewer("") is None
+
+
+def test_resolve_external_reviewer_presets():
+    assert resolve_external_reviewer("codex") == ["codex", "exec"]
+    assert resolve_external_reviewer("gemini") == ["gemini"]
+    assert resolve_external_reviewer("claude") == ["claude", "-p", "--output-format", "text"]
+
+
+def test_resolve_external_reviewer_raw_command_passes_through():
+    assert resolve_external_reviewer("codex exec -m gpt-5") == ["codex", "exec", "-m", "gpt-5"]
+    assert resolve_external_reviewer("claude -p --output-format text") == [
+        "claude", "-p", "--output-format", "text",
+    ]
+
+
+def test_resolve_external_reviewer_unknown_single_token_passes_through():
+    assert resolve_external_reviewer("unknownname") == ["unknownname"]
