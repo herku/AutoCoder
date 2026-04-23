@@ -17,32 +17,36 @@ Requires: Claude Code CLI + GitHub CLI, both authenticated.
 ```
 cli.py          Click entry point, all CLI options
 config.py       RunConfig builder; Docker image age checks; duration parsing; external-reviewer preset resolution
-loop.py         Main orchestration: fetch → prioritize → brief → implement → critique → verify → PR → review/merge; StalemateTracker
-agent.py        Invokes Claude Code CLI subprocess; rate-limit/auth detection; rate-limit wait+retry; brief/learn prompt builders
+loop.py         Main orchestration: fetch → prioritize → brief → implement → critique → verify → PR → review/merge; StalemateTracker; worktree-parallel worker pool (`--parallel N`); task-slice dispatch
+agent.py        Invokes Claude Code CLI subprocess via Popen+watchdog (idle/session timeouts); rate-limit/auth detection; rate-limit wait+retry; brief/task/learn prompt builders
 build.py        AI-powered build command detection (claude -p) with heuristic fallback
 sandbox.py      SandboxConfig: per-phase scoped allowed tools (implement/plan/brief/review/claude_md/detect)
 issues.py       GitHub CLI wrapper: fetch/parse issues, extract acceptance criteria, priority caching
 review.py       Single-reviewer + multi-agent orchestrator; external-reviewer subprocess; fix/ci_fix/build_fix prompt builders
 testplan.py     Acceptance criteria verification against diff
 verify.py       Runs lint/unit/integration/build tests (stops on first failure)
-budget.py       Token & cost tracking (per-issue + daily cap)
-git.py          GitOps class: branching, commit, diff, rollback, merge, lockfile
+budget.py       Token & cost tracking (per-issue + daily cap); thread-local per-issue tokens, locked daily totals
+git.py          GitOps class: branching, commit, diff, rollback, merge, lockfile, worktree create/remove/prune
 anticheat.py    Protect-tests mode: read-only test files, audit violations
-logger.py       JSONL logging + dead-letter queue for failures
-telemetry.py    Per-phase cost/token tracking; Phase enum incl. IMPLEMENT_BRIEF, PRE_VERIFY_CRITIQUE, REVIEW_MULTI, REVIEW_EXTERNAL
+logger.py       Thread-safe JSONL logging + dead-letter queue for failures
+telemetry.py    Thread-safe per-phase cost/token tracking; Phase enum incl. IMPLEMENT_BRIEF, PRE_VERIFY_CRITIQUE, REVIEW_MULTI, REVIEW_EXTERNAL, TASK_PLAN, TASK_EXEC; optional event-bus pub/sub for dashboard
+server.py       Localhost SSE dashboard (`--serve`): EventBus + ThreadingHTTPServer + bundled HTML
+task_slice.py   Ralph-loop-style fresh-context-per-task: heuristic, plan parse, checkbox walk
 epic.py         Epic/meta-issue support: process sub-issues, track progress, close parent
 pr.py           PR creation, readiness, CI wait, merge
-types.py        Dataclasses: Issue, AgentResult, VerifyResult, RunConfig, ReviewResult, MultiReviewResult, EpicResult, exceptions
+types.py        Dataclasses: Issue, AgentResult, VerifyResult, RunConfig, ReviewResult, MultiReviewResult, EpicResult, TaskItem, exceptions (incl. IdleTimeoutError)
 prompts/        Markdown templates loaded via prompts.load(name, repo_path); supports repo overrides + {{agent:X}} expansion
 prompts/agents/ Role briefs for brief advisors (architecture/tests/risks) and review agents (quality/implementation/testing/simplification/documentation)
 ```
 
 ## Pipeline Phases (per issue)
 
-1. Branch creation: `feat/{num}-{slug}` from main
+1. Branch creation: `feat/{num}-{slug}` from main (or per-worker worktree under `.autocoder/worktrees/` when `--parallel N`)
 2. Plan phase (optional `--plan-mode`): read-only analysis
 3. Pre-implement brief (default on, `--no-implement-brief` to disable): orchestrator spawns 3 parallel advisors (architecture/tests/risks), synthesizes a compact design brief prepended to implementer prompt
-4. Implement phase: agent writes code with scoped permissions
+4. Implement phase:
+    - Default: single long Claude session (monolithic)
+    - Task-sliced (via `--task-slice` or auto-heuristic: ≥3 acceptance-criteria checkboxes OR body >1500 chars): orchestrator writes `.autocoder/plan-<N>.md` with `- [ ]` task checklist; then each task runs in a fresh Claude subprocess that marks its checkbox done. Falls back to monolithic on plan/task failure within the same attempt.
 5. Anti-cheat audit (if `--protect-tests`): reject if test files modified
 6. Pre-verify critique (default on, `--no-pre-verify-critique` to disable): multi-agent shift-left review on staged diff; fixes in-session or raises VerificationError on unfixable findings
 7. Verification: lint -> unit -> integration -> build (stop on first failure)
@@ -89,9 +93,13 @@ Templates:
 
 **Budgets**: `--token-budget`, `--daily-cap`, `--brief-budget-usd` (1.00), `--pre-verify-budget-usd` (1.50), `--review-budget-usd` (2.00).
 
-**Retries/timeouts**: `--max-retries` (3), `--build-retries` (1), `--ci-timeout` (1800), `--stalemate-threshold` (2), `--wait-on-rate-limit` (e.g. `30s`, `5m`, `1h`; default: abort).
+**Retries/timeouts**: `--max-retries` (3), `--build-retries` (1), `--ci-timeout` (1800), `--stalemate-threshold` (2), `--wait-on-rate-limit` (e.g. `30s`, `5m`, `1h`; default: abort), `--idle-timeout` (SIGTERM on silent hang; default disabled), `--session-timeout` (absolute Claude subprocess cap; default disabled).
 
-**Phases**: `--plan-mode`, `--implement-brief`/`--no-implement-brief`, `--pre-verify-critique`/`--no-pre-verify-critique`, `--auto-merge`, `--update-claude-md`/`--no-update-claude-md`.
+**Phases**: `--plan-mode`, `--implement-brief`/`--no-implement-brief`, `--pre-verify-critique`/`--no-pre-verify-critique`, `--auto-merge`, `--update-claude-md`/`--no-update-claude-md`, `--task-slice`/`--no-task-slice` (default: auto-heuristic), `--task-retries` (1), `--max-tasks` (15).
+
+**Concurrency**: `--parallel N` (default 1) processes N issues in parallel, each in its own git worktree; `--worktree-root PATH` (default: `<repo>/.autocoder/worktrees`).
+
+**Dashboard**: `--serve`/`--no-serve` (default off) starts a localhost SSE dashboard; `--port` (default 8765).
 
 **Review**: `--review-mode {single,multi}`, `--external-reviewer` (preset name `codex`/`gemini`/`claude`, or full shell command — prompt piped on stdin).
 
