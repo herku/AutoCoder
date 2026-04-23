@@ -95,6 +95,15 @@ class RunConfig:
     brief_budget_usd: float = 1.00
     pre_verify_critique: bool = True
     pre_verify_budget_usd: float = 1.50
+    idle_timeout_seconds: Optional[int] = None
+    session_timeout_seconds: Optional[int] = None
+    serve: bool = False
+    port: int = 8765
+    task_slice: Optional[bool] = None  # None = auto-heuristic
+    task_retries: int = 1
+    max_tasks: int = 15
+    parallel: int = 1
+    worktree_root: Optional[str] = None
 
 
 @dataclass
@@ -141,6 +150,13 @@ class CIResult:
     timed_out: bool
 
 
+@dataclass
+class TaskItem:
+    index: int  # 1-based position in plan
+    text: str
+    done: bool
+
+
 class AgentError(Exception):
     pass
 
@@ -152,6 +168,12 @@ class RateLimitError(AgentError):
 
 class AuthenticationError(AgentError):
     """OAuth token expired or invalid — retrying is futile until re-authenticated."""
+    pass
+
+
+class IdleTimeoutError(AgentError):
+    """Claude subprocess produced no output for the configured idle window, or
+    exceeded the configured session cap. Retryable — treat as a silent hang."""
     pass
 
 

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 import time
 
 from autocoder.issues import truncate_body
 from autocoder.prompts import load
 from autocoder.sandbox import SandboxConfig, build_claude_cmd
-from autocoder.types import AgentResult, AgentError, AuthenticationError, RateLimitError, Issue, action_verb
+from autocoder.types import AgentResult, AgentError, AuthenticationError, IdleTimeoutError, RateLimitError, Issue, action_verb
 
 PROMPT_BODY_MAX = 4000
 
@@ -95,6 +96,38 @@ def build_implement_prompt(issue: Issue, plan_text: str, error_context: str = ""
     return base + _brief_block(brief)
 
 
+def build_task_plan_prompt(
+    issue: Issue, plan_path: str, brief: str = "", repo_path: str = "",
+) -> str:
+    """Build the orchestrator prompt that writes the per-issue task plan file."""
+    body = truncate_body(issue.body, PROMPT_BODY_MAX)
+    return load("task_plan", repo_path or None).format(
+        issue_number=issue.number,
+        issue_title=issue.title,
+        body=body,
+        plan_path=plan_path,
+        brief_block=_brief_block(brief),
+    )
+
+
+def build_task_execute_prompt(
+    issue: Issue, plan_path: str, task_text: str,
+    error_context: str = "", repo_path: str = "",
+) -> str:
+    """Build the prompt for a single-task fresh-session executor."""
+    body = truncate_body(issue.body, PROMPT_BODY_MAX)
+    verb = action_verb(issue)
+    return load("task_execute", repo_path or None).format(
+        verb=verb,
+        issue_number=issue.number,
+        issue_title=issue.title,
+        body=body,
+        plan_path=plan_path,
+        task_text=task_text,
+        error_context_block=_error_block(error_context),
+    )
+
+
 BUDGET_CI_LEARN = 1.00  # $1.00 max for CI learning step
 BUDGET_IMPL_LEARN = 1.00  # $1.00 max for implementation learning step
 CI_LEARN_OUTPUT_MAX = 5_000
@@ -167,11 +200,23 @@ def build_update_claude_md_prompt(diff: str, existing_claude_md: str | None, rep
 _rate_limit_wait_seconds: int | None = None
 _RATE_LIMIT_MAX_RETRIES = 3
 
+_idle_timeout_seconds: int | None = None
+_session_timeout_seconds: int | None = None
+_POLL_INTERVAL_S = 1.0
+_TERMINATE_GRACE_S = 5.0
+
 
 def set_rate_limit_wait(seconds: int | None) -> None:
     """Configure whether invoke_agent should sleep+retry on RateLimitError."""
     global _rate_limit_wait_seconds
     _rate_limit_wait_seconds = seconds
+
+
+def set_timeouts(idle_seconds: int | None, session_seconds: int | None) -> None:
+    """Configure subprocess idle and session hard caps. None disables each."""
+    global _idle_timeout_seconds, _session_timeout_seconds
+    _idle_timeout_seconds = idle_seconds
+    _session_timeout_seconds = session_seconds
 
 
 def invoke_agent(
@@ -209,34 +254,29 @@ def _invoke_once(
     cmd = build_claude_cmd(model, effort, max_budget_usd, sandbox, repo_path)
 
     start = time.monotonic()
-    result = subprocess.run(
-        cmd,
-        input=prompt,
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=timeout,
+    returncode, stdout, stderr = _run_with_watchdog(
+        cmd, prompt, repo_path, timeout,
+        idle_seconds=_idle_timeout_seconds,
+        session_seconds=_session_timeout_seconds,
     )
     duration_ms = int((time.monotonic() - start) * 1000)
 
     # Try to parse JSON even on non-zero exit — Claude returns exit 1
     # with valid JSON for soft errors (permission denied, tool blocked, etc.)
-    if result.returncode != 0:
+    if returncode != 0:
         try:
-            data = json.loads(result.stdout)
-            # Valid JSON response — parse it normally, is_error will be handled downstream
-            parsed = _parse_agent_output(result.stdout, duration_ms, model)
+            json.loads(stdout)
+            parsed = _parse_agent_output(stdout, duration_ms, model)
             if parsed.is_error and _is_rate_limited(parsed.result_text):
                 raise RateLimitError(parsed.result_text[:500])
             if parsed.is_error and _is_auth_error(parsed.result_text):
                 raise AuthenticationError(parsed.result_text[:500])
             return parsed
         except (json.JSONDecodeError, ValueError):
-            combined = f"{result.stderr} {result.stdout}"
+            combined = f"{stderr} {stdout}"
             msg = (
-                f"Claude CLI exited with code {result.returncode}: "
-                f"{result.stderr[:500] or result.stdout[:500]}"
+                f"Claude CLI exited with code {returncode}: "
+                f"{stderr[:500] or stdout[:500]}"
             )
             if _is_rate_limited(combined):
                 raise RateLimitError(msg)
@@ -244,12 +284,129 @@ def _invoke_once(
                 raise AuthenticationError(msg)
             raise AgentError(msg)
 
-    parsed = _parse_agent_output(result.stdout, duration_ms, model)
+    parsed = _parse_agent_output(stdout, duration_ms, model)
     if parsed.is_error and _is_rate_limited(parsed.result_text):
         raise RateLimitError(parsed.result_text[:500])
     if parsed.is_error and _is_auth_error(parsed.result_text):
         raise AuthenticationError(parsed.result_text[:500])
     return parsed
+
+
+def _run_with_watchdog(
+    cmd: list[str],
+    prompt: str,
+    repo_path: str,
+    wall_timeout: int,
+    idle_seconds: int | None,
+    session_seconds: int | None,
+) -> tuple[int, str, str]:
+    """Run a subprocess with an optional idle/session watchdog.
+
+    Always uses Popen + reader threads so idle-activity can be detected from
+    stdout. wall_timeout still fires as subprocess.TimeoutExpired to preserve
+    the existing timeout contract. idle_seconds and session_seconds raise
+    IdleTimeoutError when breached. session_seconds, when set below
+    wall_timeout, fires first and is the effective hard cap.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=repo_path,
+        bufsize=1,  # line-buffered so readline unblocks promptly
+    )
+
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    state = {"last_byte_ts": time.monotonic()}
+    state_lock = threading.Lock()
+
+    def _read(stream, buf: list[str]) -> None:
+        try:
+            for line in iter(stream.readline, ""):
+                with state_lock:
+                    state["last_byte_ts"] = time.monotonic()
+                buf.append(line)
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    def _write() -> None:
+        try:
+            if proc.stdin is not None:
+                proc.stdin.write(prompt)
+                proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+
+    t_out = threading.Thread(target=_read, args=(proc.stdout, stdout_chunks), daemon=True)
+    t_err = threading.Thread(target=_read, args=(proc.stderr, stderr_chunks), daemon=True)
+    t_in = threading.Thread(target=_write, daemon=True)
+    t_out.start()
+    t_err.start()
+    t_in.start()
+
+    start = time.monotonic()
+    try:
+        while True:
+            try:
+                returncode = proc.wait(timeout=_POLL_INTERVAL_S)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+
+            now = time.monotonic()
+            elapsed = now - start
+
+            if elapsed > wall_timeout:
+                _kill_proc(proc)
+                raise subprocess.TimeoutExpired(cmd, wall_timeout)
+
+            if session_seconds is not None and elapsed > session_seconds:
+                _kill_proc(proc)
+                raise IdleTimeoutError(
+                    f"Session timeout: ran for {int(elapsed)}s (limit {session_seconds}s)"
+                )
+
+            if idle_seconds is not None:
+                with state_lock:
+                    idle_for = now - state["last_byte_ts"]
+                if idle_for > idle_seconds:
+                    _kill_proc(proc)
+                    raise IdleTimeoutError(
+                        f"Idle timeout: no output for {int(idle_for)}s (limit {idle_seconds}s)"
+                    )
+    finally:
+        t_out.join(timeout=2.0)
+        t_err.join(timeout=2.0)
+        t_in.join(timeout=2.0)
+
+    return returncode, "".join(stdout_chunks), "".join(stderr_chunks)
+
+
+def _kill_proc(proc: subprocess.Popen) -> None:
+    """SIGTERM, wait up to _TERMINATE_GRACE_S, then SIGKILL."""
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=_TERMINATE_GRACE_S)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=_TERMINATE_GRACE_S)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _parse_agent_output(raw: str, duration_ms: int, model: str) -> AgentResult:

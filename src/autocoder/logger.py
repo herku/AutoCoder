@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -21,6 +22,7 @@ class RunLogger:
         self._log_path = self._log_dir / f"run_{self._run_id}.jsonl"
         self._dead_letter_path = self._log_dir / "failed_issues.jsonl"
         self._attempts: list[dict] = []
+        self._lock = threading.Lock()
 
     def log_attempt(
         self,
@@ -60,7 +62,8 @@ class RunLogger:
             from autocoder.telemetry import Telemetry
             record.update(Telemetry.to_jsonl_dict(telemetry))
         self._append(self._log_path, record)
-        self._attempts.append(record)
+        with self._lock:
+            self._attempts.append(record)
 
     def log_event(self, event: str, **extra: object) -> None:
         record = {
@@ -174,5 +177,6 @@ class RunLogger:
 
     def _append(self, path: Path, record: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a") as f:
-            f.write(json.dumps(record) + "\n")
+        with self._lock:
+            with open(path, "a") as f:
+                f.write(json.dumps(record) + "\n")

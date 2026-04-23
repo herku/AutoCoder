@@ -86,6 +86,15 @@ def build_config(
     brief_budget_usd: float = 1.00,
     pre_verify_critique: bool = True,
     pre_verify_budget_usd: float = 1.50,
+    idle_timeout: str | None = None,
+    session_timeout: str | None = None,
+    serve: bool = False,
+    port: int = 8765,
+    task_slice: bool | None = None,
+    task_retries: int = 1,
+    max_tasks: int = 15,
+    parallel: int = 1,
+    worktree_root: str | None = None,
 ) -> RunConfig:
     repo_path = str(Path(repo).resolve())
 
@@ -217,4 +226,13 @@ def build_config(
         brief_budget_usd=brief_budget_usd,
         pre_verify_critique=pre_verify_critique,
         pre_verify_budget_usd=pre_verify_budget_usd,
+        idle_timeout_seconds=parse_duration(idle_timeout),
+        session_timeout_seconds=parse_duration(session_timeout),
+        serve=serve,
+        port=port,
+        task_slice=task_slice,
+        task_retries=task_retries,
+        max_tasks=max_tasks,
+        parallel=max(1, parallel),
+        worktree_root=worktree_root,
     )

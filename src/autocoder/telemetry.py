@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum
@@ -20,6 +21,8 @@ class Phase(str, Enum):
     UPDATE_CLAUDE_MD = "update_claude_md"
     CI_FIX = "ci_fix"
     BUILD_FIX = "build_fix"
+    TASK_PLAN = "task_plan"
+    TASK_EXEC = "task_exec"
 
 
 class FailureCategory(str, Enum):
@@ -39,6 +42,9 @@ class FailureCategory(str, Enum):
     CI_FAIL = "ci_fail"
     CI_STALEMATE = "ci_stalemate"
     CI_TIMEOUT = "ci_timeout"
+    IDLE_TIMEOUT = "idle_timeout"
+    TASK_PLAN_FAIL = "task_plan_fail"
+    TASK_EXEC_FAIL = "task_exec_fail"
 
 
 @dataclass
@@ -126,22 +132,52 @@ class RunSummary:
 
 
 class Telemetry:
-    """Central telemetry collector for a single AutoCoder run."""
+    """Central telemetry collector.
 
-    def __init__(self) -> None:
-        self._current: Optional[IssueTelemetry] = None
+    Thread-safe: each worker thread has its own 'current issue' slot so
+    concurrent issues don't clobber one another's PhaseMetrics. Completed
+    issues are appended to a shared list under a lock.
+    """
+
+    def __init__(self, event_bus: "object | None" = None) -> None:
+        self._local = threading.local()
         self._completed: list[IssueTelemetry] = []
+        self._lock = threading.Lock()
+        self._bus = event_bus
 
-    def begin_issue(self, issue_number: int, attempt: int) -> None:
-        # If a previous issue wasn't ended (e.g. unexpected exception), end it now
-        if self._current is not None:
-            self._completed.append(self._current)
-        self._current = IssueTelemetry(issue_number=issue_number, attempt=attempt)
+    def _get_current(self) -> Optional[IssueTelemetry]:
+        return getattr(self._local, "current", None)
+
+    def _set_current(self, value: Optional[IssueTelemetry]) -> None:
+        self._local.current = value
+
+    def _emit(self, event_type: str, data: dict) -> None:
+        if self._bus is None:
+            return
+        try:
+            self._bus.publish(event_type, data)  # type: ignore[attr-defined]
+        except Exception:
+            pass  # bus failures must never break the pipeline
+
+    def emit(self, event_type: str, **data: object) -> None:
+        """Public emit for custom events (rate_limit, idle, ci_attempt, ...)."""
+        self._emit(event_type, dict(data))
+
+    def begin_issue(self, issue_number: int, attempt: int, title: str = "") -> None:
+        current = self._get_current()
+        # If a previous issue on this thread wasn't ended (e.g. unexpected
+        # exception), flush it now.
+        if current is not None:
+            with self._lock:
+                self._completed.append(current)
+        self._set_current(IssueTelemetry(issue_number=issue_number, attempt=attempt))
+        self._emit("issue_start", {"issue": issue_number, "attempt": attempt, "title": title})
 
     def record_phase(self, phase: Phase, agent_result: AgentResult) -> None:
-        if self._current is None:
+        current = self._get_current()
+        if current is None:
             return
-        self._current.phases.append(PhaseMetrics(
+        current.phases.append(PhaseMetrics(
             phase=phase,
             model=agent_result.model,
             tokens_in=agent_result.tokens_in,
@@ -151,51 +187,93 @@ class Telemetry:
             duration_ms=agent_result.duration_ms,
             num_turns=agent_result.num_turns,
         ))
+        self._emit("phase_end", {
+            "issue": current.issue_number,
+            "phase": phase.value,
+            "model": agent_result.model,
+            "tokens_in": agent_result.tokens_in,
+            "tokens_out": agent_result.tokens_out,
+            "cost_usd": round(agent_result.cost_usd, 6),
+            "duration_ms": agent_result.duration_ms,
+        })
 
     def record_verify(self, results: list[VerifyResult]) -> None:
-        if self._current is None:
+        current = self._get_current()
+        if current is None:
             return
-        self._current.verify_stages = [
+        current.verify_stages = [
             VerifyStageMetrics(
                 stage=v.stage, passed=v.passed,
                 exit_code=v.exit_code, duration_ms=v.duration_ms,
             )
             for v in results
         ]
+        issue_num = current.issue_number
+        for v in results:
+            self._emit("verify", {
+                "issue": issue_num,
+                "stage": v.stage,
+                "passed": v.passed,
+                "duration_ms": v.duration_ms,
+            })
 
     def record_review(self, review: ReviewResult) -> None:
-        if self._current is None:
+        current = self._get_current()
+        if current is None:
             return
-        self._current.review_findings = [
+        current.review_findings = [
             {"severity": f.severity, "file": f.file, "description": f.description}
             for f in review.findings
         ]
+        issue_num = current.issue_number
+        for f in review.findings:
+            self._emit("review", {
+                "issue": issue_num,
+                "severity": f.severity,
+                "file": f.file,
+                "description": f.description[:200],
+            })
 
     def record_testplan(self, result: TestPlanResult) -> None:
-        if self._current is None:
+        current = self._get_current()
+        if current is None:
             return
-        self._current.testplan_items = [
+        current.testplan_items = [
             {"criterion": i.criterion, "status": i.status, "evidence": i.evidence}
             for i in result.items
         ]
 
     def record_failure(self, category: FailureCategory) -> None:
-        if self._current is None:
+        current = self._get_current()
+        if current is None:
             return
-        self._current.failure_category = category
+        current.failure_category = category
+        self._emit("failure", {
+            "issue": current.issue_number,
+            "category": category.value,
+        })
 
     def end_issue(self, outcome: str = "") -> Optional[IssueTelemetry]:
-        if self._current is None:
+        current = self._get_current()
+        if current is None:
             return None
-        self._current.outcome = outcome
-        completed = self._current
-        self._completed.append(completed)
-        self._current = None
-        return completed
+        current.outcome = outcome
+        with self._lock:
+            self._completed.append(current)
+        self._set_current(None)
+        self._emit("issue_end", {
+            "issue": current.issue_number,
+            "outcome": outcome,
+            "cost_usd": round(current.total_cost_usd, 6),
+            "tokens_in": current.total_tokens_in,
+            "tokens_out": current.total_tokens_out,
+        })
+        return current
 
     @property
     def completed(self) -> list[IssueTelemetry]:
-        return list(self._completed)
+        with self._lock:
+            return list(self._completed)
 
     @staticmethod
     def to_jsonl_dict(it: IssueTelemetry) -> dict:
@@ -233,7 +311,9 @@ class Telemetry:
     def run_summary(
         self, daily_tokens_used: int = 0, daily_cap_tokens: int = 0,
     ) -> RunSummary:
-        outcomes = Counter(it.outcome for it in self._completed)
+        with self._lock:
+            completed = list(self._completed)
+        outcomes = Counter(it.outcome for it in completed)
         phase_cost: dict[str, float] = {}
         phase_tokens: dict[str, int] = {}
         model_cost: dict[str, float] = {}
@@ -244,7 +324,7 @@ class Telemetry:
         model_tokens: dict[str, list[int]] = {}
         issue_agg: dict[int, list] = {}
 
-        for it in self._completed:
+        for it in completed:
             key = it.issue_number
             if key not in issue_agg:
                 issue_agg[key] = [0, 0, 0, 0.0]
@@ -274,12 +354,12 @@ class Telemetry:
 
         failures = Counter(
             it.failure_category.value
-            for it in self._completed
+            for it in completed
             if it.failure_category is not None
         )
 
         # Deduplicate issues: count unique issue numbers for issues_processed
-        seen_issues = {it.issue_number for it in self._completed}
+        seen_issues = {it.issue_number for it in completed}
 
         return RunSummary(
             issues_processed=len(seen_issues),

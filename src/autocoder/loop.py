@@ -2,19 +2,23 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from pathlib import Path
 
 from autocoder.agent import (
     build_prompt, build_plan_prompt, build_implement_prompt,
+    build_task_plan_prompt, build_task_execute_prompt,
     build_update_claude_md_prompt, build_ci_learn_prompt, build_impl_learn_prompt,
     generate_implement_brief,
-    invoke_agent, set_rate_limit_wait, TIMEOUT_PLAN, TIMEOUT_IMPLEMENT, TIMEOUT_BUILD_FIX,
+    invoke_agent, set_rate_limit_wait, set_timeouts,
+    TIMEOUT_PLAN, TIMEOUT_IMPLEMENT, TIMEOUT_BUILD_FIX,
     TIMEOUT_CLAUDE_MD, BUDGET_CLAUDE_MD, BUDGET_CI_LEARN, BUDGET_IMPL_LEARN,
 )
+from autocoder import task_slice
 from autocoder.anticheat import audit_diff, protect_test_files, restore_test_files
 from autocoder.budget import BudgetTracker
 from autocoder.git import GitOps
@@ -27,6 +31,7 @@ from autocoder.review import (
     merge_reviews, review_and_fix_multi, review_pr_diff, run_external_review,
 )
 from autocoder.sandbox import SandboxConfig, build_sandbox, build_brief_sandbox, build_plan_sandbox, build_claude_md_sandbox, build_review_sandbox
+from autocoder.server import DashboardServer, EventBus
 from autocoder.testplan import (
     build_test_plan_fix_prompt,
     extract_acceptance_criteria,
@@ -38,6 +43,7 @@ from autocoder.types import (
     AgentResult,
     AntiCheatViolation,
     AuthenticationError,
+    IdleTimeoutError,
     Outcome,
     RateLimitError,
     ReviewResult,
@@ -90,17 +96,21 @@ class StalemateTracker:
 class StepTimings:
     def __init__(self) -> None:
         self._steps: list[StepTiming] = []
+        self._lock = threading.Lock()
 
     def record(self, name: str, duration_ms: int) -> None:
-        self._steps.append(StepTiming(name, duration_ms))
+        with self._lock:
+            self._steps.append(StepTiming(name, duration_ms))
 
     @property
     def steps(self) -> list[StepTiming]:
-        return list(self._steps)
+        with self._lock:
+            return list(self._steps)
 
     @property
     def total_ms(self) -> int:
-        return sum(s.duration_ms for s in self._steps)
+        with self._lock:
+            return sum(s.duration_ms for s in self._steps)
 
 
 class StepTimer:
@@ -140,9 +150,19 @@ def run(cfg: RunConfig) -> None:
     budget = BudgetTracker(cfg.token_budget, cfg.daily_cap)
     git = GitOps(cfg.repo_path)
     timings = StepTimings()
-    telem = Telemetry()
+
+    dashboard: DashboardServer | None = None
+    event_bus: EventBus | None = None
+    if cfg.serve:
+        event_bus = EventBus()
+        dashboard = DashboardServer(event_bus, port=cfg.port)
+        actual_port = dashboard.start()
+        print(f"Dashboard: http://127.0.0.1:{actual_port}")
+
+    telem = Telemetry(event_bus=event_bus)
 
     set_rate_limit_wait(cfg.rate_limit_wait_seconds)
+    set_timeouts(cfg.idle_timeout_seconds, cfg.session_timeout_seconds)
 
     # Startup — check clean BEFORE creating lockfile
     git.assert_clean()
@@ -213,26 +233,29 @@ def run(cfg: RunConfig) -> None:
         regular_issues = regular_issues[:cfg.max_issues]
         print(f"Processing {len(regular_issues)} regular issues + {len(epic_issues)} epics.\n")
 
-        # Process regular issues first (may include epic sub-issues)
-        for i, issue in enumerate(regular_issues, 1):
-            if budget.daily_exhausted():
-                log.log_event("daily_cap_reached", **budget.summary())
-                print("Daily token cap reached. Stopping.")
-                break
+        # Process regular issues: sequentially (parallel=1) or in a worker pool
+        if cfg.parallel > 1 and regular_issues:
+            _process_issues_parallel(regular_issues, cfg, git, budget, log, timings, telem)
+        else:
+            for i, issue in enumerate(regular_issues, 1):
+                if budget.daily_exhausted():
+                    log.log_event("daily_cap_reached", **budget.summary())
+                    print("Daily token cap reached. Stopping.")
+                    break
 
-            print(f"[{i}/{len(regular_issues)}] Processing #{issue.number}: {issue.title}")
-            try:
-                process_issue(issue, cfg, git, budget, log, timings, telem)
-            except RateLimitError as e:
-                log.log_event("rate_limited", error=str(e))
-                print(f"  Rate limit hit: {str(e)[:200]}")
-                print("  Stopping — retrying won't help until limit resets.")
-                break
-            except AuthenticationError as e:
-                log.log_event("auth_failed", error=str(e))
-                print(f"  Authentication failed: {str(e)[:200]}")
-                print("  Stopping — token expired or invalid. Re-authenticate and retry.")
-                break
+                print(f"[{i}/{len(regular_issues)}] Processing #{issue.number}: {issue.title}")
+                try:
+                    process_issue(issue, cfg, git, budget, log, timings, telem)
+                except RateLimitError as e:
+                    log.log_event("rate_limited", error=str(e))
+                    print(f"  Rate limit hit: {str(e)[:200]}")
+                    print("  Stopping — retrying won't help until limit resets.")
+                    break
+                except AuthenticationError as e:
+                    log.log_event("auth_failed", error=str(e))
+                    print(f"  Authentication failed: {str(e)[:200]}")
+                    print("  Stopping — token expired or invalid. Re-authenticate and retry.")
+                    break
 
         # Process epics (sub-issues implemented, then epic closed)
         for i, epic in enumerate(epic_issues, 1):
@@ -267,6 +290,8 @@ def run(cfg: RunConfig) -> None:
 
     finally:
         git.release_lock()
+        if dashboard is not None:
+            dashboard.stop()
 
 
 def process_issue(
@@ -283,7 +308,7 @@ def process_issue(
     tag = f"#{issue.number}"
 
     for attempt in range(1, cfg.max_retries + 1):
-        telem.begin_issue(issue.number, attempt)
+        telem.begin_issue(issue.number, attempt, title=issue.title)
         agent_result = None
         verify_results = []
         protected_files: list[str] = []
@@ -320,41 +345,69 @@ def process_issue(
                 else:
                     brief_text = brief_result.result_text
 
-            if cfg.plan_mode and plan_sandbox:
-                # Phase 1: Plan (read-only)
-                with StepTimer(f"plan {tag} {att}", timings):
-                    plan_prompt = build_plan_prompt(issue, cfg.repo_path)
-                    max_budget = budget.remaining_for_issue_usd(cfg.plan_model)
-                    plan_result = invoke_agent(
-                        plan_prompt, cfg.repo_path, cfg.plan_model, cfg.effort, max_budget, plan_sandbox,
-                        timeout=TIMEOUT_PLAN,
+            # Decide execution mode: task-sliced (fresh context per task) vs monolithic.
+            use_task_slice = task_slice.should_task_slice(issue, cfg)
+            task_slice_fallback_ctx = ""
+            if use_task_slice:
+                with StepTimer(f"task_slice {tag} {att}", timings):
+                    ok, ts_err, ts_result = _run_task_slice(
+                        issue, cfg, git, budget, telem, brief_text, sandbox,
                     )
-                budget.record(plan_result)
-                telem.record_phase(Phase.PLAN, plan_result)
-                if plan_result.is_error:
-                    raise AgentError(plan_result.result_text)
-                plan_text = plan_result.result_text
+                if ok:
+                    agent_result = ts_result
+                else:
+                    print(f"  Task-slice fallback: {ts_err[:150]}")
+                    git.rollback(checkpoint)
+                    subprocess.run(
+                        ["git", "clean", "-fd"], cwd=cfg.repo_path,
+                        check=False, capture_output=True,
+                    )
+                    use_task_slice = False
+                    task_slice_fallback_ctx = (
+                        f"Prior task-slice attempt failed: {ts_err[:300]}"
+                    )
 
-                # Phase 2: Implement with plan context (+ brief if present)
-                prompt = build_implement_prompt(
-                    issue, plan_text, error_context, cfg.repo_path, brief=brief_text,
-                )
-            else:
-                prompt = build_prompt(
-                    issue,
-                    error_context=error_context,
-                    repo_path=cfg.repo_path,
-                    brief=brief_text,
-                )
+            if not use_task_slice:
+                # Monolithic implement path.
+                mono_err_ctx = error_context
+                if task_slice_fallback_ctx and not mono_err_ctx:
+                    mono_err_ctx = task_slice_fallback_ctx
 
-            with StepTimer(f"agent {tag} {att}", timings):
-                max_budget = budget.remaining_for_issue_usd(cfg.model)
-                agent_result = invoke_agent(prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox)
-            budget.record(agent_result)
-            telem.record_phase(Phase.IMPLEMENT, agent_result)
+                if cfg.plan_mode and plan_sandbox:
+                    # Phase 1: Plan (read-only)
+                    with StepTimer(f"plan {tag} {att}", timings):
+                        plan_prompt = build_plan_prompt(issue, cfg.repo_path)
+                        max_budget = budget.remaining_for_issue_usd(cfg.plan_model)
+                        plan_result = invoke_agent(
+                            plan_prompt, cfg.repo_path, cfg.plan_model, cfg.effort, max_budget, plan_sandbox,
+                            timeout=TIMEOUT_PLAN,
+                        )
+                    budget.record(plan_result)
+                    telem.record_phase(Phase.PLAN, plan_result)
+                    if plan_result.is_error:
+                        raise AgentError(plan_result.result_text)
+                    plan_text = plan_result.result_text
 
-            if agent_result.is_error:
-                raise AgentError(agent_result.result_text)
+                    # Phase 2: Implement with plan context (+ brief if present)
+                    prompt = build_implement_prompt(
+                        issue, plan_text, mono_err_ctx, cfg.repo_path, brief=brief_text,
+                    )
+                else:
+                    prompt = build_prompt(
+                        issue,
+                        error_context=mono_err_ctx,
+                        repo_path=cfg.repo_path,
+                        brief=brief_text,
+                    )
+
+                with StepTimer(f"agent {tag} {att}", timings):
+                    max_budget = budget.remaining_for_issue_usd(cfg.model)
+                    agent_result = invoke_agent(prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox)
+                budget.record(agent_result)
+                telem.record_phase(Phase.IMPLEMENT, agent_result)
+
+                if agent_result.is_error:
+                    raise AgentError(agent_result.result_text)
 
             # Restore test files before verification
             if protected_files:
@@ -582,6 +635,9 @@ def process_issue(
                         return
             elif isinstance(e, AntiCheatViolation):
                 telem.record_failure(FailureCategory.ANTICHEAT_VIOLATION)
+            elif isinstance(e, IdleTimeoutError):
+                telem.record_failure(FailureCategory.IDLE_TIMEOUT)
+                telem.emit("idle", issue=issue.number, reason=str(e))
             elif isinstance(e, AgentError):
                 telem.record_failure(FailureCategory.AGENT_ERROR)
 
@@ -600,7 +656,13 @@ def process_issue(
                 )
                 print(f"  Attempt {attempt} failed: {str(e)[:200]}")
                 if not error_context:
-                    error_context = str(e)
+                    if isinstance(e, IdleTimeoutError):
+                        error_context = (
+                            f"Previous attempt hung silently ({str(e)}). "
+                            "Make visible progress early — prefer small incremental edits and avoid long silent thinking."
+                        )
+                    else:
+                        error_context = str(e)
             else:
                 # Final failure
                 issue_telem = telem.end_issue(outcome=Outcome.SKIP.value)
@@ -631,6 +693,181 @@ def process_issue(
 
     # Should not reach here, but safety net
     git.checkout_main()
+
+
+def _default_worktree_root(cfg: RunConfig) -> Path:
+    if cfg.worktree_root:
+        return Path(cfg.worktree_root)
+    return Path(cfg.repo_path) / ".autocoder" / "worktrees"
+
+
+def _process_issues_parallel(
+    regular_issues: list, cfg: RunConfig, main_git: GitOps,
+    budget: BudgetTracker, log: RunLogger, timings: StepTimings, telem: Telemetry,
+) -> None:
+    """Run `process_issue` concurrently in per-issue worktrees. Stops submitting
+    new work when any worker raises RateLimitError / AuthenticationError.
+    """
+    root = _default_worktree_root(cfg)
+    root.mkdir(parents=True, exist_ok=True)
+    # Prune any stale worktree admin records from previous runs
+    main_git.prune_worktrees()
+
+    stop_event = threading.Event()
+
+    def _worker(issue) -> str:
+        if stop_event.is_set():
+            return "skipped"
+        if budget.daily_exhausted():
+            return "daily_cap"
+
+        wt_path = root / f"issue-{issue.number}"
+        # Clear any leftover from a prior failed run
+        if wt_path.exists():
+            main_git.remove_worktree(str(wt_path))
+
+        wt_branch = f"autocoder-wt-{log.run_id}-{issue.number}"
+        try:
+            main_git.create_worktree(str(wt_path), wt_branch, base=main_git.get_main_branch())
+        except subprocess.CalledProcessError as e:
+            print(f"  [#{issue.number}] worktree create failed: {e.stderr[:200] if e.stderr else e}")
+            return "worktree_error"
+
+        worker_git = GitOps(str(wt_path))
+        try:
+            print(f"  [#{issue.number}] start in {wt_path}")
+            process_issue(issue, cfg, worker_git, budget, log, timings, telem)
+            return "success"
+        except RateLimitError as e:
+            stop_event.set()
+            log.log_event("rate_limited", error=str(e), issue=issue.number)
+            print(f"  [#{issue.number}] Rate limit hit. Stopping submission.")
+            raise
+        except AuthenticationError as e:
+            stop_event.set()
+            log.log_event("auth_failed", error=str(e), issue=issue.number)
+            print(f"  [#{issue.number}] Authentication failed. Stopping submission.")
+            raise
+        except Exception as e:
+            print(f"  [#{issue.number}] unhandled worker error: {str(e)[:200]}")
+            return "error"
+        finally:
+            try:
+                main_git.remove_worktree(str(wt_path))
+            except Exception:
+                pass
+
+    with ThreadPoolExecutor(max_workers=cfg.parallel) as pool:
+        futures = {pool.submit(_worker, iss): iss for iss in regular_issues}
+        try:
+            for fut in as_completed(futures):
+                try:
+                    fut.result()
+                except (RateLimitError, AuthenticationError):
+                    # stop_event already set; cancel any not-yet-started futures
+                    for f in futures:
+                        if not f.done():
+                            f.cancel()
+                    break
+        finally:
+            main_git.prune_worktrees()
+
+
+def _run_task_slice(
+    issue, cfg: RunConfig, git: GitOps, budget: BudgetTracker, telem: Telemetry,
+    brief_text: str, sandbox: SandboxConfig,
+) -> tuple[bool, str, AgentResult | None]:
+    """Run the task-sliced implement flow.
+
+    Generates a plan file, then executes each `- [ ]` task in a fresh Claude
+    subprocess until all are marked `- [x]`. Returns (success, err_ctx, last_result).
+    On failure, caller is expected to roll back the working tree.
+    """
+    plan_p = task_slice.plan_path(cfg.repo_path, issue.number)
+    plan_p.parent.mkdir(parents=True, exist_ok=True)
+    # Ensure stale plan doesn't bleed into this attempt
+    if plan_p.exists():
+        try:
+            plan_p.unlink()
+        except OSError:
+            pass
+
+    plan_prompt = build_task_plan_prompt(issue, str(plan_p), brief_text, cfg.repo_path)
+    max_budget = budget.remaining_for_issue_usd(cfg.model)
+    plan_result = invoke_agent(
+        plan_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox,
+    )
+    budget.record(plan_result)
+    telem.record_phase(Phase.TASK_PLAN, plan_result)
+
+    if plan_result.is_error or not plan_p.exists():
+        telem.record_failure(FailureCategory.TASK_PLAN_FAIL)
+        return False, f"Plan generation failed: {plan_result.result_text[:300]}", plan_result
+
+    tasks = task_slice.parse_plan(plan_p.read_text())
+    if not tasks:
+        telem.record_failure(FailureCategory.TASK_PLAN_FAIL)
+        return False, "Plan had no parseable `- [ ]` tasks.", plan_result
+    if len(tasks) > cfg.max_tasks:
+        telem.record_failure(FailureCategory.TASK_PLAN_FAIL)
+        return False, f"Plan has {len(tasks)} tasks; --max-tasks is {cfg.max_tasks}.", plan_result
+
+    print(f"  Task plan: {len(tasks)} tasks across fresh sessions.")
+    telem.emit("task_plan", issue=issue.number, total=len(tasks))
+
+    last_result: AgentResult = plan_result
+    # Cap loop iterations as a safety bound against checkbox-lying subprocesses
+    for _ in range(cfg.max_tasks * (cfg.task_retries + 1) + 1):
+        tasks = task_slice.parse_plan(plan_p.read_text())
+        current = task_slice.next_task(tasks)
+        if current is None:
+            break
+
+        task_err = ""
+        task_success = False
+        for _attempt in range(cfg.task_retries + 1):
+            exec_prompt = build_task_execute_prompt(
+                issue, str(plan_p), current.text,
+                error_context=task_err, repo_path=cfg.repo_path,
+            )
+            max_budget = budget.remaining_for_issue_usd(cfg.model)
+            t_result = invoke_agent(
+                exec_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox,
+            )
+            budget.record(t_result)
+            telem.record_phase(Phase.TASK_EXEC, t_result)
+            last_result = t_result
+
+            if t_result.is_error:
+                task_err = t_result.result_text[:500] or "agent error"
+                continue
+
+            after = task_slice.parse_plan(plan_p.read_text())
+            if len(after) >= current.index and after[current.index - 1].done:
+                task_success = True
+                telem.emit(
+                    "task_exec", issue=issue.number,
+                    index=current.index, text=current.text[:120],
+                    done_count=task_slice.done_count(after), total=len(after),
+                )
+                break
+
+            task_err = (
+                f"Task #{current.index} was not marked [x] in {plan_p}. "
+                "Edit the plan file to flip this task's `- [ ]` to `- [x]` after making the code change."
+            )
+
+        if not task_success:
+            telem.record_failure(FailureCategory.TASK_EXEC_FAIL)
+            return False, f"Task #{current.index} failed: {task_err[:300]}", last_result
+
+    # Build a human-readable summary from the completed plan for PR body
+    final_tasks = task_slice.parse_plan(plan_p.read_text())
+    summary_lines = ["Completed tasks:"]
+    for t in final_tasks:
+        summary_lines.append(f"- [{'x' if t.done else ' '}] {t.text}")
+    last_result.result_text = "\n".join(summary_lines)[:1000]
+    return True, "", last_result
 
 
 def _post_pr_review_and_merge(
@@ -880,6 +1117,10 @@ def _do_merge(
     for ci_attempt in range(1, cfg.max_retries + 1):
         print(f"  Waiting for CI checks (attempt {ci_attempt}, timeout {cfg.ci_timeout}s)...")
         ci_result = wait_for_ci(cfg.repo_path, pr_url, cfg.ci_timeout)
+        telem.emit(
+            "ci", issue=issue.number, attempt=ci_attempt,
+            passed=ci_result.passed, timed_out=ci_result.timed_out,
+        )
 
         if ci_result.timed_out:
             print(f"  CI timed out after {cfg.ci_timeout}s. Skipping merge.")

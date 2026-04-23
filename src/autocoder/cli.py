@@ -93,6 +93,56 @@ from autocoder.loop import run
     type=float,
     help="Budget cap for the pre-verify critique orchestrator (default $1.50).",
 )
+@click.option(
+    "--idle-timeout",
+    default=None,
+    help="Kill Claude subprocess if no stdout for this long (e.g. '5m', '90s'). Default: disabled.",
+)
+@click.option(
+    "--session-timeout",
+    default=None,
+    help="Hard cap on Claude subprocess duration (e.g. '30m', '1h'). Fires before per-phase wall timeout. Default: disabled.",
+)
+@click.option(
+    "--serve/--no-serve",
+    default=False,
+    help="Start a localhost dashboard that streams live run events via SSE.",
+)
+@click.option(
+    "--port",
+    default=8765,
+    type=int,
+    help="Dashboard port when --serve is set (default 8765).",
+)
+@click.option(
+    "--task-slice/--no-task-slice",
+    default=None,
+    help="Slice the implement phase into tasks executed in fresh Claude sessions. "
+    "Default: auto (enable when the issue has ≥3 acceptance criteria or body > 1500 chars).",
+)
+@click.option(
+    "--task-retries",
+    default=1,
+    type=int,
+    help="Per-task retry count within the task-slice loop (default 1).",
+)
+@click.option(
+    "--max-tasks",
+    default=15,
+    type=int,
+    help="Cap on task count; plans above this fall back to monolithic implement (default 15).",
+)
+@click.option(
+    "--parallel",
+    default=1,
+    type=int,
+    help="Process N issues concurrently, each in its own git worktree (default 1).",
+)
+@click.option(
+    "--worktree-root",
+    default=None,
+    help="Directory for per-issue git worktrees (default: <repo>/.autocoder/worktrees).",
+)
 def main(**kwargs: object) -> None:
     """AutoCoder: Autonomous AI coding agent loop.
 

@@ -185,3 +185,21 @@ class GitOps:
             branches = [b.strip().lstrip("* ") for b in result.stdout.strip().split("\n") if b.strip()]
             for branch in branches:
                 self._run("branch", "-D", branch, check=False)
+
+    def create_worktree(self, path: str, branch: str, base: str | None = None) -> None:
+        """Create a fresh worktree at `path`, on a new branch off `base` (default: main).
+
+        Caller is responsible for `remove_worktree` on completion.
+        """
+        target = base or self.get_main_branch()
+        # Force: drop any pre-existing branch with the same name
+        self._run("branch", "-D", branch, check=False)
+        self._run("worktree", "add", "-b", branch, path, target)
+
+    def remove_worktree(self, path: str) -> None:
+        """Force-remove a worktree at `path`. Safe to call multiple times."""
+        self._run("worktree", "remove", "--force", path, check=False)
+
+    def prune_worktrees(self) -> None:
+        """Clean up worktree administrative records for removed directories."""
+        self._run("worktree", "prune", check=False)
