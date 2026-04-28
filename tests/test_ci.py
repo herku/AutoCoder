@@ -52,9 +52,13 @@ def test_build_ci_fix_prompt():
 
 
 def test_build_ci_fix_prompt_truncates():
-    long_output = "x" * (CI_OUTPUT_MAX + 1000)
+    # Use a sentinel character that doesn't appear in the prompt template so
+    # we can count it cleanly. The template grew with the systematic-debugging
+    # 4-phase structure; the property under test is "input is truncated".
+    sentinel = "Ⓢ"  # circled M, very unlikely to appear in prose
+    long_output = sentinel * (CI_OUTPUT_MAX + 1000)
     prompt = build_ci_fix_prompt(long_output)
-    assert len(prompt) < CI_OUTPUT_MAX + 500  # template overhead
+    assert prompt.count(sentinel) == CI_OUTPUT_MAX
 
 
 def test_ci_fix_template_loads():

@@ -18,6 +18,13 @@ class Priority(str, Enum):
     P3 = "P3"
 
 
+class ImplementerStatus(str, Enum):
+    DONE = "DONE"
+    DONE_WITH_CONCERNS = "DONE_WITH_CONCERNS"
+    BLOCKED = "BLOCKED"
+    NEEDS_CONTEXT = "NEEDS_CONTEXT"
+
+
 @dataclass
 class Issue:
     number: int
@@ -40,6 +47,8 @@ class AgentResult:
     cost_usd: float
     num_turns: int
     model: str
+    status: Optional["ImplementerStatus"] = None
+    status_detail: Optional[str] = None
 
 
 @dataclass
@@ -104,6 +113,9 @@ class RunConfig:
     max_tasks: int = 15
     parallel: int = 1
     worktree_root: Optional[str] = None
+    escalate_on_block: bool = True
+    escalation_model: str = "claude-opus-4-7"
+    ci_arch_review: bool = True
 
 
 @dataclass
@@ -174,6 +186,12 @@ class AuthenticationError(AgentError):
 class IdleTimeoutError(AgentError):
     """Claude subprocess produced no output for the configured idle window, or
     exceeded the configured session cap. Retryable — treat as a silent hang."""
+    pass
+
+
+class ImplementerBlockedError(AgentError):
+    """Implementer reported STATUS: BLOCKED (or NEEDS_CONTEXT) and the
+    in-attempt escalation retry also failed."""
     pass
 
 

@@ -15,6 +15,7 @@ from autocoder.task_slice import (
     parse_plan,
     plan_path,
     should_task_slice,
+    validate_plan,
 )
 from autocoder.types import Issue, Priority, RunConfig
 
@@ -134,3 +135,64 @@ def test_plan_path_is_under_autocoder_dir(tmp_path: Path):
     p = plan_path(str(tmp_path), 42)
     assert p.parent.name == ".autocoder"
     assert p.name == "plan-42.md"
+
+
+# ---- validate_plan (placeholder lint) ----
+
+def test_validate_plan_clean_returns_empty():
+    plan = """# Plan
+## Tasks
+### Task 1: Add greeting
+**Files:**
+- Create: `src/greeter.py`
+- Test: `tests/test_greeter.py`
+
+- [ ] Step 1: Write the failing test
+  ```python
+  def test_greet():
+      assert greet("ada") == "Hello, ada"
+  ```
+- [ ] Step 2: Run pytest, expect FAIL.
+"""
+    assert validate_plan(plan) == []
+
+
+def test_validate_plan_flags_tbd():
+    plan = "- [ ] Task 1: implement TBD foo"
+    assert any("TBD" in v for v in validate_plan(plan))
+
+
+def test_validate_plan_flags_todo_and_implement_later():
+    plan = "TODO: do this thing\n- [ ] Step 2: implement later"
+    violations = validate_plan(plan)
+    assert any("TODO" in v for v in violations)
+    assert any("implement later" in v.lower() for v in violations)
+
+
+def test_validate_plan_flags_appropriate_error_handling():
+    plan = "- [ ] Step 3: Add appropriate error handling around the file open"
+    violations = validate_plan(plan)
+    assert any("error handling" in v for v in violations)
+
+
+def test_validate_plan_flags_similar_to_task_n():
+    plan = "### Task 5: Refactor\n- [ ] Step 1: Similar to Task 2"
+    assert any("similar to task n" in v.lower() for v in validate_plan(plan))
+
+
+def test_validate_plan_flags_ellipsis_placeholder():
+    plan = "- [ ] Step 1: do (...)"
+    assert any("..." in v for v in validate_plan(plan))
+
+
+def test_validate_plan_does_not_flag_handle_edge_cases_with_code_block():
+    # 'handle edge cases' followed by a fenced code block on the same line is OK
+    # (the executor has the actual handling). We're conservative: as long as
+    # the line includes a code-block marker, no violation.
+    plan = "- [ ] handle edge cases ```code```"
+    assert validate_plan(plan) == []
+
+
+def test_validate_plan_case_insensitive():
+    plan = "- [ ] Step 1: tbd"
+    assert any("TBD" in v for v in validate_plan(plan))

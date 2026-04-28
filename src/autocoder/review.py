@@ -12,6 +12,9 @@ from autocoder.types import AgentResult, MultiReviewResult, ReviewFinding, Revie
 
 REVIEW_DIFF_MAX = 50_000
 REVIEW_MULTI_TIMEOUT = 900  # 15 minutes — 5 parallel sub-agents take time
+SPEC_REVIEW_TIMEOUT = 600   # 10 minutes — single sub-agent + 1 fix loop
+SPEC_BUDGET_FRACTION = 0.4  # round 1 gets 40% of total budget; round 2 gets the rest
+MIN_QUALITY_BUDGET = 0.20   # cents — abort round 2 if remaining is below this
 
 
 def review_pr_diff(diff: str, repo_path: str, model: str = "sonnet") -> ReviewResult:
@@ -104,6 +107,19 @@ def build_build_fix_prompt(build_output: str, build_cmd: str = "", repo_path: st
     return load("build_fix", repo_path or None).format(build_output=truncated, build_cmd=build_cmd or "unknown")
 
 
+def build_ci_fix_arch_prompt(
+    ci_output: str, previous_attempts: str, repo_path: str = "",
+) -> str:
+    """Build the analysis-only architectural critique prompt fired when CI-fix
+    attempts have stalemated. The prompt forbids edits — the agent must return
+    a recommendation only."""
+    truncated = ci_output[:CI_OUTPUT_MAX]
+    prior = previous_attempts.strip() or "(no prior attempts recorded)"
+    return load("ci_fix_arch", repo_path or None).format(
+        ci_output=truncated, previous_attempts=prior,
+    )
+
+
 # ---------------------------------------------------------------------------
 # External (second-opinion) reviewer
 # ---------------------------------------------------------------------------
@@ -178,21 +194,36 @@ def _format_external_findings(external: ReviewResult | None) -> str:
     )
 
 
-def _parse_multi_signal(raw: str) -> tuple[bool, bool, str]:
-    """Parse REVIEW_DONE / REVIEW_FIXED / REVIEW_FAILED signal from final line.
+def _parse_signal(raw: str, prefix: str) -> tuple[bool, bool, str]:
+    """Parse a `<PREFIX>_DONE` / `<PREFIX>_FIXED` / `<PREFIX>_FAILED` signal from
+    the final non-empty line.
 
-    Returns (cleaned, failed, summary).
+    Returns (cleaned, failed, summary). `prefix` is e.g. "REVIEW", "SPEC",
+    "QUALITY".
     """
     text = (raw or "").strip()
     if not text:
         return False, True, "empty response"
     last = text.splitlines()[-1].strip()
-    if last == "REVIEW_DONE" or last == "REVIEW_FIXED":
+    done = f"{prefix}_DONE"
+    fixed = f"{prefix}_FIXED"
+    failed = f"{prefix}_FAILED"
+    if last == done or last == fixed:
         return True, False, last
-    if last.startswith("REVIEW_FAILED"):
+    if last.startswith(failed):
         return False, True, last
-    # No signal line — treat as ambiguous failure so caller doesn't auto-merge
-    return False, True, f"no signal line (last: {last[:80]})"
+    return False, True, f"no {prefix.lower()} signal (last: {last[:80]})"
+
+
+def _parse_multi_signal(raw: str) -> tuple[bool, bool, str]:
+    """Backward-compatible parser for the legacy REVIEW_DONE/REVIEW_FIXED/REVIEW_FAILED
+    signals — still used by the post-PR quality round, which emits QUALITY_*
+    via the new prompt, but tests and callers may also pass legacy text."""
+    cleaned, failed, summary = _parse_signal(raw, "QUALITY")
+    if cleaned or failed and "no quality signal" not in summary:
+        return cleaned, failed, summary
+    # Fall back to the old signal namespace
+    return _parse_signal(raw, "REVIEW")
 
 
 def review_and_fix_multi(
@@ -202,26 +233,99 @@ def review_and_fix_multi(
     sandbox: SandboxConfig,
     budget_usd: float,
     external: ReviewResult | None = None,
-) -> tuple[MultiReviewResult, AgentResult]:
-    """Run the multi-agent orchestrator. It fixes issues in-session.
+    *,
+    issue_body: str = "",
+    telem: object | None = None,
+    budget_tracker: object | None = None,
+    spec_phase: object | None = None,
+    quality_phase: object | None = None,
+) -> tuple[MultiReviewResult, list[AgentResult]]:
+    """Run two sequential review rounds: spec compliance first, then code quality.
 
-    Returns (outcome, agent_result) so callers can record telemetry.
+    Round 1 (spec): single agent verifies the implementation matches the issue.
+    Spawns ONE sub-agent and may attempt one fix pass. Short-circuits the whole
+    review if the spec gap can't be closed.
+
+    Round 2 (quality): five parallel agents review code quality, security,
+    testing, simplification, documentation. Skipped if round 1 fails.
+
+    Telemetry: each round calls `telem.record_phase(spec_phase | quality_phase, result)`
+    when both `telem` and the corresponding phase are provided. This lets callers
+    distinguish the spec vs quality cost buckets, and keeps the function reusable
+    for both pre-verify and post-PR contexts (callers pass whichever Phase they
+    want to attribute to).
+
+    Budget: round 1 takes `SPEC_BUDGET_FRACTION` of `budget_usd`; round 2 takes
+    the remainder (or `budget_usd - spent` if round 1 underran). Round 2 is
+    skipped if remaining budget is below `MIN_QUALITY_BUDGET`.
+
+    Returns (MultiReviewResult, [round_results]). `MultiReviewResult.failed` is
+    True if either round failed; the summary names which round.
     """
     from autocoder.agent import invoke_agent
 
     truncated = diff[:REVIEW_DIFF_MAX] if len(diff) > REVIEW_DIFF_MAX else diff
-    prompt = load("review_multi", repo_path).format(
+    body = issue_body or "(no issue body provided to reviewer)"
+    results: list[AgentResult] = []
+
+    # ---- Round 1: spec compliance ----
+    spec_budget = max(budget_usd * SPEC_BUDGET_FRACTION, 0.10)
+    spec_prompt = load("review_spec_compliance", repo_path).format(
+        diff=truncated, issue_body=body,
+    )
+    spec_result = invoke_agent(
+        spec_prompt, repo_path, model, "max", spec_budget, sandbox,
+        timeout=SPEC_REVIEW_TIMEOUT,
+    )
+    results.append(spec_result)
+    if telem is not None and spec_phase is not None and budget_tracker is not None:
+        budget_tracker.record(spec_result)  # type: ignore[attr-defined]
+        telem.record_phase(spec_phase, spec_result)  # type: ignore[attr-defined]
+
+    spec_cleaned, spec_failed, spec_summary = _parse_signal(spec_result.result_text, "SPEC")
+    if spec_failed:
+        return (
+            MultiReviewResult(
+                cleaned=False, failed=True,
+                summary=f"spec:{spec_summary}",
+                raw_response=spec_result.result_text,
+            ),
+            results,
+        )
+
+    # ---- Round 2: quality ----
+    remaining = max(budget_usd - spec_result.cost_usd, 0.0)
+    if remaining < MIN_QUALITY_BUDGET:
+        return (
+            MultiReviewResult(
+                cleaned=spec_cleaned, failed=False,
+                summary=f"spec:{spec_summary} | quality:skipped (budget exhausted)",
+                raw_response=spec_result.result_text,
+            ),
+            results,
+        )
+
+    quality_prompt = load("review_quality", repo_path).format(
         diff=truncated,
         external_findings=_format_external_findings(external),
     )
-    result = invoke_agent(
-        prompt, repo_path, model, "max", budget_usd, sandbox,
+    quality_result = invoke_agent(
+        quality_prompt, repo_path, model, "max", remaining, sandbox,
         timeout=REVIEW_MULTI_TIMEOUT,
     )
-    cleaned, failed, summary = _parse_multi_signal(result.result_text)
+    results.append(quality_result)
+    if telem is not None and quality_phase is not None and budget_tracker is not None:
+        budget_tracker.record(quality_result)  # type: ignore[attr-defined]
+        telem.record_phase(quality_phase, quality_result)  # type: ignore[attr-defined]
+
+    q_cleaned, q_failed, q_summary = _parse_signal(quality_result.result_text, "QUALITY")
+    final_summary = f"spec:{spec_summary} | quality:{q_summary}"
     return (
         MultiReviewResult(
-            cleaned=cleaned, failed=failed, summary=summary, raw_response=result.result_text,
+            cleaned=spec_cleaned and q_cleaned,
+            failed=q_failed,
+            summary=final_summary,
+            raw_response=quality_result.result_text,
         ),
-        result,
+        results,
     )

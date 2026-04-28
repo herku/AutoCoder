@@ -21,6 +21,24 @@ A task plan exists at: {plan_path}
 - Do NOT run the full test suite. A single targeted test for your change is fine.
 - If the task is unclear, already done, or blocked: STOP, briefly explain why, and leave the checkbox as `- [ ]`.
 
+## Before reporting STATUS: DONE for THIS task
+
+NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE.
+
+A single targeted test for THIS task's change is sufficient (do not run the full suite). Quote its pass/fail in your report. If the test does not exist yet for this task, run a focused build/lint check on the touched files and quote that.
+
+## Report Format (REQUIRED — last line of your reply)
+
+End your reply with EXACTLY one line of the form:
+
+    STATUS: <DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT>: <one-line detail>
+
+Use:
+- **DONE** — task done, checkbox flipped to `- [x]`, targeted verification passed.
+- **DONE_WITH_CONCERNS** — task done but a follow-up may be needed; state the concern.
+- **BLOCKED** — cannot complete this task (architectural ambiguity, dependency missing, contradicting earlier task). Leave the checkbox as `- [ ]`. The orchestrator may retry with a stronger model.
+- **NEEDS_CONTEXT** — you need information not provided in the plan or issue body. State what.
+
 Issue body (for context):
 {body}
 {error_context_block}

@@ -31,7 +31,7 @@ Role briefs to spawn:
 
 ## Step 3 — Synthesize
 
-After all 3 advisors return, produce the final design brief. Consolidate overlapping points, drop anything speculative or not actionable, and deliver a single compact bullet list with three sections:
+After all 3 advisors return, produce the final design brief. Consolidate overlapping points, drop anything speculative or not actionable, and deliver a single compact bullet list with these sections:
 
 ```
 ## Architecture
@@ -42,8 +42,26 @@ After all 3 advisors return, produce the final design brief. Consolidate overlap
 
 ## Risks to watch
 - ...
+
+## Scope decisions
+- IN: <thing> — <one-line rationale>
+- IN: ...
+- OUT: <thing> — <one-line rationale (e.g., "deferred to follow-up issue", "out of stated AC", "would expand blast radius")>
+- OUT: ...
 ```
 
-Target 300–600 words total. The brief should be immediately actionable — the implementer should know exactly what files to touch, what tests to add, and what pitfalls to avoid.
+The **Scope decisions** section is required. Be explicit about what is intentionally NOT being built. The implementer is told to stay inside this scope; anything you mark OUT will not be implemented even if a sub-agent argued for it.
+
+Target 300–600 words total. The brief should be immediately actionable — the implementer should know exactly what files to touch, what tests to add, what pitfalls to avoid, and where the scope ends.
+
+## Step 4 — Self-review (run before emitting)
+
+Re-read the brief once with fresh eyes:
+
+1. **Contradiction scan** — did the architecture and tests sections contradict each other? Did one advisor recommend X while another recommended not-X? Pick one and document why.
+2. **Placeholder scan** — search for `TBD`, `TODO`, `as appropriate`, `(...)`, vague verbs without an object. Replace with concrete content.
+3. **Scope completeness** — every advisor recommendation from steps 2 should appear in the brief either as IN (with a step) or OUT (with a rationale). Nothing silently dropped.
+
+Fix issues inline. Do not emit the brief until all three checks pass.
 
 Output the brief directly. No preamble, no closing remarks. No signal lines.

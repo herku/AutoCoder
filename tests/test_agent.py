@@ -11,10 +11,13 @@ from autocoder.agent import (
     _parse_agent_output,
     generate_implement_brief,
     invoke_agent,
+    parse_status,
     set_rate_limit_wait,
 )
 from autocoder.sandbox import SandboxConfig
-from autocoder.types import AgentResult, Issue, Priority, RateLimitError
+from autocoder.types import (
+    AgentResult, ImplementerStatus, Issue, Priority, RateLimitError,
+)
 
 
 def _make_issue(body="The widget crashes on save"):
@@ -173,6 +176,89 @@ def test_build_implement_prompt_with_brief():
     assert "plan goes here" in prompt
     assert "Design brief from advisory agents:" in prompt
     assert "Brief item one" in prompt
+
+
+# ---------- status parsing ----------
+
+
+def test_parse_status_done():
+    text = "Did the work.\n\nSTATUS: DONE: tests pass 12/12"
+    status, detail = parse_status(text)
+    assert status is ImplementerStatus.DONE
+    assert detail == "tests pass 12/12"
+
+
+def test_parse_status_done_no_detail():
+    text = "Did the work.\n\nSTATUS: DONE"
+    status, detail = parse_status(text)
+    assert status is ImplementerStatus.DONE
+    assert detail is None
+
+
+def test_parse_status_done_with_concerns():
+    text = "Done.\nSTATUS: DONE_WITH_CONCERNS: flaky test in foo_test.py"
+    status, detail = parse_status(text)
+    assert status is ImplementerStatus.DONE_WITH_CONCERNS
+    assert "flaky" in (detail or "")
+
+
+def test_parse_status_blocked():
+    text = "Tried 3 approaches.\nSTATUS: BLOCKED: API contract for /users is undocumented"
+    status, detail = parse_status(text)
+    assert status is ImplementerStatus.BLOCKED
+    assert "undocumented" in (detail or "")
+
+
+def test_parse_status_needs_context():
+    text = "STATUS: NEEDS_CONTEXT: cannot find auth_provider.py"
+    status, detail = parse_status(text)
+    assert status is ImplementerStatus.NEEDS_CONTEXT
+    assert "auth_provider" in (detail or "")
+
+
+def test_parse_status_missing():
+    status, detail = parse_status("Just some output without a status line.")
+    assert status is None
+    assert detail is None
+
+
+def test_parse_status_multi_status_last_wins():
+    text = (
+        "STATUS: BLOCKED: initial guess\n"
+        "Recovered after re-reading the file.\n"
+        "STATUS: DONE: shipped"
+    )
+    status, detail = parse_status(text)
+    assert status is ImplementerStatus.DONE
+    assert detail == "shipped"
+
+
+def test_parse_status_in_quoted_block():
+    text = "> STATUS: DONE: from a quoted block still counts"
+    status, detail = parse_status(text)
+    assert status is ImplementerStatus.DONE
+
+
+def test_parse_status_case_insensitive_token():
+    # Implementer might lowercase by accident; the regex is case-insensitive on
+    # the token, but we want to normalize to the canonical enum.
+    text = "status: done: lower-case slip"
+    status, _ = parse_status(text)
+    assert status is ImplementerStatus.DONE
+
+
+def test_parse_agent_output_propagates_status():
+    data = {
+        "session_id": "sess-7",
+        "result": "Implemented.\nSTATUS: BLOCKED: unclear API",
+        "is_error": False,
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+        "cost_usd": 0.0,
+        "num_turns": 1,
+    }
+    result = _parse_agent_output(json.dumps(data), 100, "sonnet")
+    assert result.status is ImplementerStatus.BLOCKED
+    assert result.status_detail and "unclear API" in result.status_detail
 
 
 def test_generate_implement_brief_calls_invoke_agent():

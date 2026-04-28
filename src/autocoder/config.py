@@ -95,6 +95,9 @@ def build_config(
     max_tasks: int = 15,
     parallel: int = 1,
     worktree_root: str | None = None,
+    escalate_on_block: bool = True,
+    escalation_model: str = "claude-opus-4-7",
+    ci_arch_review: bool = True,
 ) -> RunConfig:
     repo_path = str(Path(repo).resolve())
 
@@ -235,4 +238,7 @@ def build_config(
         max_tasks=max_tasks,
         parallel=max(1, parallel),
         worktree_root=worktree_root,
+        escalate_on_block=escalate_on_block,
+        escalation_model=escalation_model,
+        ci_arch_review=ci_arch_review,
     )

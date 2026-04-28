@@ -74,3 +74,47 @@ def done_count(tasks: list[TaskItem]) -> int:
 
 def all_done(tasks: list[TaskItem]) -> bool:
     return bool(tasks) and all(t.done for t in tasks)
+
+
+# Plan-quality lint: forbidden phrases that signal an under-specified plan.
+# Patterns are matched case-insensitively. Each pattern carries the rationale
+# so a regenerated plan can cite specifically why the prior draft was rejected.
+_PLACEHOLDER_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\bTBD\b", "literal TBD — write the actual content the executor needs"),
+    (r"\bTODO\b", "literal TODO — write the actual content"),
+    (r"\bFIXME\b", "literal FIXME"),
+    (r"\bimplement\s+later\b", "'implement later' — turn it into a concrete step now"),
+    (r"\bfill\s+in\s+details?\b", "'fill in details' — fill them in"),
+    (r"\bas\s+appropriate\b", "'as appropriate' — name the specific behaviour"),
+    (
+        r"\badd\s+appropriate\s+(error\s+handling|validation|guard\w*)\b",
+        "'add appropriate error handling/validation' — show the actual handling code",
+    ),
+    (
+        r"\bhandle\s+edge\s+cases\b(?![^\n]*```)",
+        "'handle edge cases' without a code block — list the cases and the handling",
+    ),
+    (
+        r"\bsimilar\s+to\s+task\s+\d+\b",
+        "'similar to Task N' — repeat the actual content (the executor sees one task at a time)",
+    ),
+    (r"\bsame\s+as\s+above\b", "'same as above' — repeat the actual content"),
+    (r"\bsee\s+task\s+\d+\b", "'see Task N' — repeat the actual content"),
+    (r"<elided>", "'<elided>' placeholder"),
+    (r"<omitted>", "'<omitted>' placeholder"),
+    (r"\(\.\.\.\)", "'(...)' placeholder ellipsis"),
+)
+
+
+def validate_plan(plan_text: str) -> list[str]:
+    """Return a list of plan-quality violations found in `plan_text`.
+
+    Empty list means the plan passes. Each entry is a short reason describing
+    the violation; callers are expected to feed the list back to the planner
+    when regenerating.
+    """
+    violations: list[str] = []
+    for pattern, reason in _PLACEHOLDER_PATTERNS:
+        if re.search(pattern, plan_text, flags=re.IGNORECASE):
+            violations.append(reason)
+    return violations

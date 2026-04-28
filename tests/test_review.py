@@ -6,6 +6,7 @@ from autocoder.prompts import load
 from autocoder.review import (
     _format_external_findings,
     _parse_multi_signal,
+    _parse_signal,
     build_fix_prompt,
     merge_reviews,
     parse_review_response,
@@ -131,24 +132,87 @@ def test_format_external_findings_with_items():
     assert "[MEDIUM] y.py: Leak" in text
 
 
-def test_review_and_fix_multi_done(tmp_path):
-    (tmp_path / ".git").mkdir()  # satisfy anything that checks; not used by mock
-    with patch("autocoder.agent.invoke_agent", return_value=_ok_result("all good\nREVIEW_DONE")):
-        outcome, result = review_and_fix_multi(
+def test_parse_signal_spec_done():
+    cleaned, failed, summary = _parse_signal("ok\nSPEC_DONE", "SPEC")
+    assert cleaned and not failed and summary == "SPEC_DONE"
+
+
+def test_parse_signal_spec_failed():
+    cleaned, failed, summary = _parse_signal("nope\nSPEC_FAILED: missing X", "SPEC")
+    assert not cleaned and failed and "missing X" in summary
+
+
+def test_parse_signal_quality_fixed():
+    cleaned, failed, _ = _parse_signal("done\nQUALITY_FIXED", "QUALITY")
+    assert cleaned and not failed
+
+
+def test_review_and_fix_multi_both_rounds_pass(tmp_path):
+    (tmp_path / ".git").mkdir()
+    side = [
+        _ok_result("looks good\nSPEC_DONE"),
+        _ok_result("nothing to fix\nQUALITY_DONE"),
+    ]
+    with patch("autocoder.agent.invoke_agent", side_effect=side) as mock:
+        outcome, results = review_and_fix_multi(
             "diff text", str(tmp_path), "sonnet", _sbx(), 2.00,
         )
+    assert mock.call_count == 2
+    assert len(results) == 2
     assert outcome.cleaned
     assert not outcome.failed
-    assert result.result_text.endswith("REVIEW_DONE")
+    assert "SPEC_DONE" in outcome.summary
+    assert "QUALITY_DONE" in outcome.summary
 
 
-def test_review_and_fix_multi_failed_signal(tmp_path):
-    with patch("autocoder.agent.invoke_agent", return_value=_ok_result("tried\nREVIEW_FAILED: human needed")):
+def test_review_and_fix_multi_spec_fails_short_circuits(tmp_path):
+    side = [_ok_result("missed Y\nSPEC_FAILED: requirement Y not implemented")]
+    with patch("autocoder.agent.invoke_agent", side_effect=side) as mock:
+        outcome, results = review_and_fix_multi(
+            "diff", str(tmp_path), "sonnet", _sbx(), 2.00,
+        )
+    # round 2 must NOT have been called
+    assert mock.call_count == 1
+    assert len(results) == 1
+    assert outcome.failed
+    assert outcome.summary.startswith("spec:SPEC_FAILED")
+
+
+def test_review_and_fix_multi_quality_fails(tmp_path):
+    side = [
+        _ok_result("matched\nSPEC_DONE"),
+        _ok_result("3 critical\nQUALITY_FAILED: race condition in handler"),
+    ]
+    with patch("autocoder.agent.invoke_agent", side_effect=side):
         outcome, _ = review_and_fix_multi(
-            "diff text", str(tmp_path), "sonnet", _sbx(), 2.00,
+            "diff", str(tmp_path), "sonnet", _sbx(), 2.00,
         )
     assert outcome.failed
-    assert "human needed" in outcome.summary
+    assert "QUALITY_FAILED" in outcome.summary
+    assert "race condition" in outcome.summary
+
+
+def test_review_and_fix_multi_records_telemetry(tmp_path):
+    """When telem + budget + phases are passed, both rounds are recorded."""
+    from autocoder.telemetry import Phase
+
+    side = [
+        _ok_result("ok\nSPEC_DONE"),
+        _ok_result("clean\nQUALITY_DONE"),
+    ]
+    telem = MagicMock()
+    bt = MagicMock()
+    with patch("autocoder.agent.invoke_agent", side_effect=side):
+        review_and_fix_multi(
+            "diff", str(tmp_path), "sonnet", _sbx(), 2.00,
+            telem=telem, budget_tracker=bt,
+            spec_phase=Phase.REVIEW_SPEC_COMPLIANCE,
+            quality_phase=Phase.REVIEW_QUALITY,
+        )
+    # record_phase called once per round
+    phases = [c.args[0] for c in telem.record_phase.call_args_list]
+    assert phases == [Phase.REVIEW_SPEC_COMPLIANCE, Phase.REVIEW_QUALITY]
+    assert bt.record.call_count == 2
 
 
 # ---------- external reviewer + merge ----------

@@ -5,12 +5,43 @@ import subprocess
 import threading
 import time
 
+import re
+
 from autocoder.issues import truncate_body
 from autocoder.prompts import load
 from autocoder.sandbox import SandboxConfig, build_claude_cmd
-from autocoder.types import AgentResult, AgentError, AuthenticationError, IdleTimeoutError, RateLimitError, Issue, action_verb
+from autocoder.types import (
+    AgentResult, AgentError, AuthenticationError, IdleTimeoutError,
+    ImplementerStatus, RateLimitError, Issue, action_verb,
+)
 
 PROMPT_BODY_MAX = 4000
+
+_STATUS_RE = re.compile(
+    r"^[\s>*\-]*STATUS:\s*(DONE_WITH_CONCERNS|NEEDS_CONTEXT|BLOCKED|DONE)\b[\s:\-]*(.*)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def parse_status(result_text: str) -> tuple[ImplementerStatus | None, str | None]:
+    """Extract the LAST STATUS: <token> line from the agent's report.
+
+    Returns (status, detail) or (None, None) if absent. Detail is the trailing
+    text on the same line; full surrounding lines are not captured (the
+    implementer is told to put the explanation right after the colon).
+    """
+    if not result_text:
+        return None, None
+    matches = list(_STATUS_RE.finditer(result_text))
+    if not matches:
+        return None, None
+    last = matches[-1]
+    token = last.group(1).upper()
+    detail = (last.group(2) or "").strip() or None
+    try:
+        return ImplementerStatus(token), detail
+    except ValueError:
+        return None, None
 
 _RATE_LIMIT_PATTERNS = [
     "hit your limit",
@@ -414,9 +445,11 @@ def _parse_agent_output(raw: str, duration_ms: int, model: str) -> AgentResult:
         data = json.loads(raw)
     except json.JSONDecodeError:
         # Non-JSON output — treat as plain text result
+        plain = raw[:2000]
+        status, status_detail = parse_status(plain)
         return AgentResult(
             session_id="unknown",
-            result_text=raw[:2000],
+            result_text=plain,
             is_error=False,
             duration_ms=duration_ms,
             tokens_in=0,
@@ -425,6 +458,8 @@ def _parse_agent_output(raw: str, duration_ms: int, model: str) -> AgentResult:
             cost_usd=0.0,
             num_turns=0,
             model=model,
+            status=status,
+            status_detail=status_detail,
         )
 
     # Claude JSON output format
@@ -437,6 +472,7 @@ def _parse_agent_output(raw: str, duration_ms: int, model: str) -> AgentResult:
         )
 
     usage = data.get("usage", {})
+    status, status_detail = parse_status(result_text)
 
     return AgentResult(
         session_id=data.get("session_id", "unknown"),
@@ -449,4 +485,6 @@ def _parse_agent_output(raw: str, duration_ms: int, model: str) -> AgentResult:
         cost_usd=data.get("cost_usd", 0.0),
         num_turns=data.get("num_turns", 0),
         model=model,
+        status=status,
+        status_detail=status_detail,
     )

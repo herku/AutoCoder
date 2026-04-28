@@ -1,8 +1,8 @@
-You are orchestrating a thorough code review for the change below. You will spawn 5 specialized review sub-agents IN PARALLEL, consolidate their findings, verify each one against the actual source, then fix confirmed issues in-session.
+You are running ROUND 2 of a two-stage code review: **code quality**. Spec compliance has already been verified — focus only on quality, security, testing, simplification, and documentation.
 
 ## Context
 
-Working directory is the git repository with the proposed change already applied. Primary branch is `main`. The diff to review:
+Working directory is the git repository with the proposed change already applied (and any spec fixes from round 1). Primary branch is `main`. The diff to review:
 
 ```
 {diff}
@@ -16,7 +16,7 @@ External reviewer findings (may be empty):
 
 Use `Bash(git diff:*)`, `Bash(git log:*)`, and `Read` to understand the branch's full set of changes. Look at files touched, commit messages, and surrounding code that calls into the modified functions. Do NOT skip this — a diff in isolation is incomplete.
 
-## Step 2 — Spawn 5 review agents in parallel
+## Step 2 — Spawn 5 quality review agents in parallel
 
 Issue **exactly 5 `Task` tool calls in a single assistant turn**. Do NOT use `run_in_background`. All 5 must be foreground so they run in parallel and block until all complete.
 
@@ -62,8 +62,8 @@ For each verified finding, fix it directly using Edit/Write. After fixing:
 
 End your final message with EXACTLY one of these lines as the last line:
 
-- `REVIEW_DONE` — no real issues found (after dedup and verification).
-- `REVIEW_FIXED` — found issues, fixed them all.
-- `REVIEW_FAILED: <short reason>` — found critical issues that could not be fixed.
+- `QUALITY_DONE` — no real issues found (after dedup and verification).
+- `QUALITY_FIXED` — found issues, fixed them all.
+- `QUALITY_FAILED: <short reason>` — found critical issues that could not be fixed.
 
 No other text after the signal line.

@@ -143,6 +143,21 @@ from autocoder.loop import run
     default=None,
     help="Directory for per-issue git worktrees (default: <repo>/.autocoder/worktrees).",
 )
+@click.option(
+    "--escalate-on-block/--no-escalate-on-block",
+    default=True,
+    help="When the implementer reports STATUS: BLOCKED or NEEDS_CONTEXT, retry once with --escalation-model. Default: on.",
+)
+@click.option(
+    "--escalation-model",
+    default="claude-opus-4-7",
+    help="Stronger Claude model used only for BLOCKED/NEEDS_CONTEXT in-attempt retries (default claude-opus-4-7).",
+)
+@click.option(
+    "--ci-arch-review/--no-ci-arch-review",
+    default=True,
+    help="When CI-fix attempts approach the stalemate threshold, run an architectural critique to question the pattern instead of patching again. Default: on.",
+)
 def main(**kwargs: object) -> None:
     """AutoCoder: Autonomous AI coding agent loop.
 

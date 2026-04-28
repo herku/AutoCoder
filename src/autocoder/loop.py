@@ -27,8 +27,9 @@ from autocoder.issues import analyze_and_prioritize, fetch_issues, fetch_issues_
 from autocoder.logger import RunLogger
 from autocoder.pr import comment_failure, create_pr, label_failed, mark_ready, merge_pr, wait_for_ci, wait_for_new_checks
 from autocoder.review import (
-    build_build_fix_prompt, build_ci_fix_prompt, build_fix_prompt,
-    merge_reviews, review_and_fix_multi, review_pr_diff, run_external_review,
+    build_build_fix_prompt, build_ci_fix_prompt, build_ci_fix_arch_prompt,
+    build_fix_prompt, merge_reviews, review_and_fix_multi, review_pr_diff,
+    run_external_review,
 )
 from autocoder.sandbox import SandboxConfig, build_sandbox, build_brief_sandbox, build_plan_sandbox, build_claude_md_sandbox, build_review_sandbox
 from autocoder.server import DashboardServer, EventBus
@@ -44,6 +45,8 @@ from autocoder.types import (
     AntiCheatViolation,
     AuthenticationError,
     IdleTimeoutError,
+    ImplementerBlockedError,
+    ImplementerStatus,
     Outcome,
     RateLimitError,
     ReviewResult,
@@ -294,6 +297,93 @@ def run(cfg: RunConfig) -> None:
             dashboard.stop()
 
 
+_BLOCKING_STATUSES = {ImplementerStatus.BLOCKED, ImplementerStatus.NEEDS_CONTEXT}
+
+
+def _handle_implementer_status(
+    agent_result: AgentResult, original_prompt: str, cfg: RunConfig,
+    sandbox: SandboxConfig, budget: BudgetTracker, telem: Telemetry,
+    tag: str, att: str, timings: StepTimings,
+) -> AgentResult:
+    """React to STATUS: line in implementer reply.
+
+    BLOCKED / NEEDS_CONTEXT → if --escalate-on-block, retry once with the
+    stronger escalation model and the implementer's stated detail prepended as
+    additional context. If the retry still reports BLOCKED/NEEDS_CONTEXT,
+    raise ImplementerBlockedError so the outer attempt loop counts it as a
+    failure.
+
+    DONE_WITH_CONCERNS → log + emit telemetry, then proceed.
+    DONE / unknown → no-op.
+    """
+    status = agent_result.status
+    detail = (agent_result.status_detail or "").strip()
+    issue_num = telem._get_current().issue_number if telem._get_current() else 0
+
+    if status == ImplementerStatus.DONE_WITH_CONCERNS:
+        print(f"  Implementer DONE_WITH_CONCERNS: {detail[:200]}")
+        telem.emit("implementer_concerns", issue=issue_num, detail=detail[:500])
+        return agent_result
+
+    if status not in _BLOCKING_STATUSES:
+        return agent_result
+
+    if not cfg.escalate_on_block:
+        raise ImplementerBlockedError(
+            f"Implementer reported {status.value}: {detail[:300]}"
+        )
+
+    print(
+        f"  Implementer {status.value}: {detail[:200]}\n"
+        f"  Escalating to {cfg.escalation_model}..."
+    )
+    telem.emit(
+        "implementer_escalation",
+        issue=issue_num, status=status.value, detail=detail[:500],
+        from_model=cfg.model, to_model=cfg.escalation_model,
+    )
+
+    escalation_prompt = (
+        f"{original_prompt}\n\n"
+        "--- PRIOR ATTEMPT REPORTED A BLOCKING STATUS ---\n"
+        f"Prior model: {cfg.model}\n"
+        f"Prior status: {status.value}\n"
+        f"Prior detail: {detail or '(no detail provided)'}\n"
+        "You are a stronger model picking this up. Address the blocker "
+        "explicitly: if it was missing context, infer it from the codebase; "
+        "if it was architectural ambiguity, pick the simplest viable path "
+        "and document why. Do NOT report the same blocking status again."
+        "\n--- END PRIOR ATTEMPT ---\n"
+    )
+
+    with StepTimer(f"agent_escalation {tag} {att}", timings):
+        max_budget = budget.remaining_for_issue_usd(cfg.escalation_model)
+        escalated = invoke_agent(
+            escalation_prompt, cfg.repo_path, cfg.escalation_model, cfg.effort,
+            max_budget, sandbox,
+        )
+    budget.record(escalated)
+    telem.record_phase(Phase.IMPLEMENT, escalated)
+
+    if escalated.is_error:
+        raise AgentError(escalated.result_text)
+
+    if escalated.status in _BLOCKING_STATUSES:
+        raise ImplementerBlockedError(
+            f"Escalation to {cfg.escalation_model} also reported "
+            f"{escalated.status.value}: {(escalated.status_detail or '')[:300]}"
+        )
+
+    if escalated.status == ImplementerStatus.DONE_WITH_CONCERNS:
+        print(f"  Escalation DONE_WITH_CONCERNS: {(escalated.status_detail or '')[:200]}")
+        telem.emit(
+            "implementer_concerns", issue=issue_num,
+            detail=(escalated.status_detail or "")[:500], escalated=True,
+        )
+
+    return escalated
+
+
 def process_issue(
     issue, cfg: RunConfig, git: GitOps, budget: BudgetTracker, log: RunLogger,
     timings: StepTimings, telem: Telemetry,
@@ -409,6 +499,10 @@ def process_issue(
                 if agent_result.is_error:
                     raise AgentError(agent_result.result_text)
 
+                agent_result = _handle_implementer_status(
+                    agent_result, prompt, cfg, sandbox, budget, telem, tag, att, timings,
+                )
+
             # Restore test files before verification
             if protected_files:
                 restore_test_files(protected_files)
@@ -419,7 +513,7 @@ def process_issue(
                 with StepTimer(f"anticheat {tag}", timings):
                     audit_diff(cfg.repo_path, cfg.test_patterns)
 
-            # Stage 3.5 (optional): pre-verify critique (multi-agent shift-left review)
+            # Stage 3.5 (optional): pre-verify critique (two-stage shift-left review)
             if cfg.pre_verify_critique:
                 with StepTimer(f"pre_verify_critique {tag} {att}", timings):
                     diff_for_critique = git.diff_full()
@@ -427,12 +521,14 @@ def process_issue(
                     critique_budget = min(
                         cfg.pre_verify_budget_usd, budget.remaining_for_issue_usd(cfg.model),
                     )
-                    critique_outcome, critique_result = review_and_fix_multi(
+                    critique_outcome, _ = review_and_fix_multi(
                         diff_for_critique, cfg.repo_path, cfg.model,
                         critique_sandbox, critique_budget,
+                        issue_body=issue.body,
+                        telem=telem, budget_tracker=budget,
+                        spec_phase=Phase.PRE_VERIFY_CRITIQUE,
+                        quality_phase=Phase.PRE_VERIFY_CRITIQUE,
                     )
-                budget.record(critique_result)
-                telem.record_phase(Phase.PRE_VERIFY_CRITIQUE, critique_result)
                 print(f"  Pre-verify critique: {critique_outcome.summary}")
                 if critique_outcome.failed:
                     error_context = (
@@ -804,6 +900,34 @@ def _run_task_slice(
         telem.record_failure(FailureCategory.TASK_PLAN_FAIL)
         return False, f"Plan generation failed: {plan_result.result_text[:300]}", plan_result
 
+    # Placeholder lint — reject under-specified plans, regenerate once.
+    violations = task_slice.validate_plan(plan_p.read_text())
+    if violations:
+        print(f"  Plan placeholder lint: {len(violations)} violation(s); regenerating once.")
+        violations_msg = "\n".join(f"- {v}" for v in violations)
+        regen_prompt = (
+            f"{plan_prompt}\n\n"
+            "--- PRIOR PLAN REJECTED ---\n"
+            "Your previous draft contained placeholder phrases. Rewrite the\n"
+            "plan and replace each of the following with the actual content:\n"
+            f"{violations_msg}\n"
+            "--- END REJECTION ---\n"
+        )
+        max_budget = budget.remaining_for_issue_usd(cfg.model)
+        plan_result = invoke_agent(
+            regen_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox,
+        )
+        budget.record(plan_result)
+        telem.record_phase(Phase.TASK_PLAN, plan_result)
+        if plan_result.is_error or not plan_p.exists():
+            telem.record_failure(FailureCategory.TASK_PLAN_FAIL)
+            return False, f"Plan regeneration failed: {plan_result.result_text[:300]}", plan_result
+        violations = task_slice.validate_plan(plan_p.read_text())
+        if violations:
+            telem.record_failure(FailureCategory.TASK_PLAN_FAIL)
+            print(f"  Plan still has {len(violations)} placeholder violation(s) after regeneration; falling back to monolithic implement.")
+            return False, "Plan placeholders persisted after regeneration.", plan_result
+
     tasks = task_slice.parse_plan(plan_p.read_text())
     if not tasks:
         telem.record_failure(FailureCategory.TASK_PLAN_FAIL)
@@ -1012,16 +1136,23 @@ def _multi_review_and_merge(
             ))
 
         budget_cap = min(cfg.review_budget_usd, budget.remaining_for_issue_usd(cfg.review_model))
-        outcome, agent_result = review_and_fix_multi(
+        outcome, _ = review_and_fix_multi(
             diff, cfg.repo_path, cfg.review_model, review_sandbox, budget_cap,
             external=external,
+            issue_body=issue.body,
+            telem=telem, budget_tracker=budget,
+            spec_phase=Phase.REVIEW_SPEC_COMPLIANCE,
+            quality_phase=Phase.REVIEW_QUALITY,
         )
-        budget.record(agent_result)
-        telem.record_phase(Phase.REVIEW_MULTI, agent_result)
         print(f"  Review outcome: {outcome.summary}")
 
         if outcome.failed:
-            telem.record_failure(FailureCategory.REVIEW_REJECTED)
+            if "QUALITY_FAILED" in outcome.summary:
+                telem.record_failure(FailureCategory.QUALITY_REVIEW_FAILED)
+            elif "SPEC_FAILED" in outcome.summary:
+                telem.record_failure(FailureCategory.SPEC_COMPLIANCE_FAILED)
+            else:
+                telem.record_failure(FailureCategory.REVIEW_REJECTED)
             return f"PR ready but review orchestrator reported unfixable issues: {pr_url}"
 
         # If the orchestrator cleaned up, re-verify before merging
@@ -1096,6 +1227,43 @@ def _run_ci_learn(
         pass  # Non-critical — don't fail the pipeline
 
 
+_CI_ARCH_TIMEOUT = 600  # 10 minutes — analysis-only, single sub-agent
+_CI_ARCH_BUDGET = 0.50  # cents — capped; arch review is read-only and short
+
+
+def _run_ci_arch_review(
+    cfg: RunConfig, budget: BudgetTracker, telem: Telemetry,
+    ci_output: str, prior_attempts: str,
+) -> str:
+    """Run the analysis-only architectural critique; return the recommendation
+    text (empty on failure / disabled / budget exhausted). Read-only sandbox.
+    """
+    arch_budget = min(_CI_ARCH_BUDGET, budget.remaining_for_issue_usd(cfg.review_model))
+    if arch_budget < 0.05:
+        return ""
+    arch_prompt = build_ci_fix_arch_prompt(ci_output, prior_attempts, cfg.repo_path)
+    arch_sandbox = build_plan_sandbox(cfg)
+    print("  Stalemate detected — running architectural critique (analysis-only)...")
+    try:
+        arch_result = invoke_agent(
+            arch_prompt, cfg.repo_path, cfg.review_model, cfg.effort,
+            arch_budget, arch_sandbox, timeout=_CI_ARCH_TIMEOUT,
+        )
+    except (RateLimitError, AuthenticationError):
+        raise
+    except Exception as e:
+        print(f"  Arch critique skipped: {str(e)[:100]}")
+        return ""
+    budget.record(arch_result)
+    telem.record_phase(Phase.CI_FIX_ARCH, arch_result)
+    if arch_result.is_error:
+        print("  Arch critique returned an error; skipping.")
+        return ""
+    head = arch_result.result_text[:400].replace("\n", " ")
+    print(f"  Arch critique: {head}...")
+    return arch_result.result_text
+
+
 def _do_merge(
     cfg: RunConfig,
     git: GitOps,
@@ -1137,7 +1305,29 @@ def _do_merge(
         print(f"  CI checks failed. Attempting fix ({ci_attempt}/{cfg.max_retries})...")
         telem.record_failure(FailureCategory.CI_FAIL)
 
+        # When the stalemate tracker is at threshold-1, prior fixes have not
+        # changed the head SHA — symptom-patching has stalled. Run an
+        # analysis-only architectural critique to inform this attempt.
+        arch_recommendation = ""
+        if (
+            cfg.ci_arch_review and ci_fix_context and
+            stalemate.streak >= max(cfg.stalemate_threshold - 1, 1)
+        ):
+            arch_recommendation = _run_ci_arch_review(
+                cfg, budget, telem, ci_result.output, ci_fix_context,
+            )
+
         fix_prompt = build_ci_fix_prompt(ci_result.output, previous_attempts=ci_fix_context, repo_path=cfg.repo_path)
+        if arch_recommendation:
+            fix_prompt = (
+                "## Architectural critique from prior-attempts analysis\n\n"
+                f"{arch_recommendation}\n\n"
+                "Use this context when proposing the fix below. If the critique "
+                "recommends ESCALATE or REFACTOR beyond the scope of one fix, "
+                "make the smallest viable change and clearly document the "
+                "remaining gap in your commit message.\n\n"
+                "---\n\n"
+            ) + fix_prompt
         max_budget = budget.remaining_for_issue_usd(cfg.model)
 
         try:
