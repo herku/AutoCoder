@@ -39,6 +39,18 @@ def review_pr_diff(diff: str, repo_path: str, model: str = "sonnet") -> ReviewRe
     return parse_review_response(result.stdout)
 
 
+# Models don't always stick to the critical/medium vocabulary the prompt asks
+# for; anything clearly blocking maps to critical rather than being dropped.
+_SEVERITY_MAP = {
+    "critical": "critical",
+    "blocker": "critical",
+    "high": "critical",
+    "major": "critical",
+    "medium": "medium",
+    "moderate": "medium",
+}
+
+
 def parse_review_response(raw: str) -> ReviewResult:
     """Parse the review JSON response into a ReviewResult."""
     cleaned = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`")
@@ -56,8 +68,8 @@ def parse_review_response(raw: str) -> ReviewResult:
     for entry in data:
         if not isinstance(entry, dict):
             continue
-        severity = entry.get("severity", "").lower()
-        if severity not in ("critical", "medium"):
+        severity = _SEVERITY_MAP.get(entry.get("severity", "").lower())
+        if severity is None:
             continue
         findings.append(ReviewFinding(
             severity=severity,
@@ -82,13 +94,33 @@ def build_fix_prompt(findings: list[ReviewFinding], repo_path: str = "") -> str:
 
 
 CI_OUTPUT_MAX = 30_000
+LOG_HEAD_KEEP = 2_000
+
+
+def _truncate_output(text: str, max_chars: int, head: int = LOG_HEAD_KEEP) -> str:
+    """Truncate command/CI logs keeping the head AND the tail.
+
+    Errors usually appear near the end of a log, but the first compile error
+    matters too — so keep a small head and spend the rest of the budget on
+    the tail, with an explicit marker for what was dropped.
+    """
+    if len(text) <= max_chars:
+        return text
+    head = min(head, max_chars // 4)
+    tail = max_chars - head
+    dropped = len(text) - head - tail
+    return (
+        text[:head]
+        + f"\n... [{dropped} chars truncated] ...\n"
+        + text[-tail:]
+    )
 
 
 def build_ci_fix_prompt(ci_output: str, previous_attempts: str = "", repo_path: str = "") -> str:
     """Build a prompt for the fix agent based on CI failure output."""
     from autocoder.agent import _error_block
 
-    truncated = ci_output[:CI_OUTPUT_MAX] if len(ci_output) > CI_OUTPUT_MAX else ci_output
+    truncated = _truncate_output(ci_output, CI_OUTPUT_MAX)
     base = load("ci_fix", repo_path or None).format(ci_output=truncated)
     if previous_attempts:
         base += _error_block(
@@ -103,7 +135,7 @@ BUILD_OUTPUT_MAX = 30_000
 
 def build_build_fix_prompt(build_output: str, build_cmd: str = "", repo_path: str = "") -> str:
     """Build a prompt for the agent to fix a build failure."""
-    truncated = build_output[:BUILD_OUTPUT_MAX] if len(build_output) > BUILD_OUTPUT_MAX else build_output
+    truncated = _truncate_output(build_output, BUILD_OUTPUT_MAX)
     return load("build_fix", repo_path or None).format(build_output=truncated, build_cmd=build_cmd or "unknown")
 
 
@@ -113,7 +145,7 @@ def build_ci_fix_arch_prompt(
     """Build the analysis-only architectural critique prompt fired when CI-fix
     attempts have stalemated. The prompt forbids edits — the agent must return
     a recommendation only."""
-    truncated = ci_output[:CI_OUTPUT_MAX]
+    truncated = _truncate_output(ci_output, CI_OUTPUT_MAX)
     prior = previous_attempts.strip() or "(no prior attempts recorded)"
     return load("ci_fix_arch", repo_path or None).format(
         ci_output=truncated, previous_attempts=prior,

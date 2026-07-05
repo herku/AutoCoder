@@ -29,14 +29,14 @@ def build_sandbox(cfg: RunConfig) -> SandboxConfig:
         "Bash(git log:*)",
     ]
 
-    if cfg.build_cmd:
-        tools.append(f"Bash({cfg.build_cmd})")
-    if cfg.lint_cmd:
-        tools.append(f"Bash({cfg.lint_cmd})")
-    if cfg.test_cmd:
-        tools.append(f"Bash({cfg.test_cmd})")
-    if cfg.integration_cmd:
-        tools.append(f"Bash({cfg.integration_cmd})")
+    # Allow the exact command plus a full-command prefix wildcard so agents
+    # can run targeted subsets (e.g. `uv run pytest tests/test_x.py::test_y`).
+    # The wildcard is anchored to the whole configured command, never its
+    # first token — `Bash(uv:*)` would authorize far more than intended.
+    for cmd in (cfg.build_cmd, cfg.lint_cmd, cfg.test_cmd, cfg.integration_cmd):
+        if cmd:
+            tools.append(f"Bash({cmd})")
+            tools.append(f"Bash({cmd}:*)")
 
     # Common safe commands
     tools.extend([

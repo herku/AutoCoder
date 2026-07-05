@@ -46,6 +46,18 @@ def test_parse_review_response_filters_low():
     assert result.findings[0].severity == "critical"
 
 
+def test_parse_review_response_normalizes_blocking_severities():
+    raw = json.dumps([
+        {"severity": "high", "file": "a.py", "description": "Race condition"},
+        {"severity": "major", "file": "b.py", "description": "Data loss"},
+        {"severity": "blocker", "file": "c.py", "description": "Crash on start"},
+        {"severity": "moderate", "file": "d.py", "description": "Weak validation"},
+    ])
+    result = parse_review_response(raw)
+    assert result.has_actionable_issues
+    assert [f.severity for f in result.findings] == ["critical", "critical", "critical", "medium"]
+
+
 def test_parse_review_response_invalid_json():
     result = parse_review_response("not json")
     assert not result.has_actionable_issues
@@ -69,6 +81,28 @@ def test_build_fix_prompt():
     assert "src/app.py" in prompt
     assert "SQL injection" in prompt
     assert "Fix ONLY" in prompt
+
+
+def test_truncate_output_short_text_unchanged():
+    from autocoder.review import _truncate_output
+    assert _truncate_output("short log", 100) == "short log"
+
+
+def test_truncate_output_keeps_head_and_tail():
+    from autocoder.review import _truncate_output
+    text = "HEAD_MARKER " + ("x" * 100_000) + " TAIL_MARKER"
+    out = _truncate_output(text, 30_000)
+    assert len(out) < 31_000
+    assert "HEAD_MARKER" in out
+    assert "TAIL_MARKER" in out
+    assert "chars truncated" in out
+
+
+def test_build_ci_fix_prompt_keeps_tail_of_long_logs(tmp_path):
+    from autocoder.review import build_ci_fix_prompt
+    ci_output = ("noise line\n" * 10_000) + "FAILED tests/test_final.py::test_x - AssertionError"
+    prompt = build_ci_fix_prompt(ci_output)
+    assert "FAILED tests/test_final.py::test_x" in prompt
 
 
 def test_review_template_has_placeholders():

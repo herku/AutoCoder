@@ -96,7 +96,7 @@ def build_config(
     parallel: int = 1,
     worktree_root: str | None = None,
     escalate_on_block: bool = True,
-    escalation_model: str = "claude-opus-4-7",
+    escalation_model: str = "claude-opus-4-8",
     ci_arch_review: bool = True,
 ) -> RunConfig:
     repo_path = str(Path(repo).resolve())

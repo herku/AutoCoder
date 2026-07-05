@@ -14,9 +14,9 @@ from autocoder.loop import run
 @click.option("--test-cmd", default=None, help="Test command (e.g. 'npm test')")
 @click.option("--lint-cmd", default=None, help="Lint command (e.g. 'npm run lint')")
 @click.option("--integration-cmd", default=None, help="Integration test command")
-@click.option("--model", default="claude-sonnet-4-6", help="Claude model for implementation, review, and fix tasks")
-@click.option("--plan-model", default="claude-opus-4-6", help="Claude model for planning phase (requires --plan-mode)")
-@click.option("--review-model", default="claude-opus-4-6", help="Claude model for code review (requires --auto-merge)")
+@click.option("--model", default="claude-sonnet-5", help="Claude model for implementation, review, and fix tasks")
+@click.option("--plan-model", default="claude-opus-4-8", help="Claude model for planning phase (requires --plan-mode)")
+@click.option("--review-model", default="claude-opus-4-8", help="Claude model for code review (requires --auto-merge)")
 @click.option("--effort", default="max", type=click.Choice(["min", "low", "medium", "high", "max"]), help="Claude effort level")
 @click.option("--triage-model", default="haiku", help="Claude model for issue triage/summarization")
 @click.option("--max-issues", default=10, type=int, help="Maximum issues to process per run")
@@ -69,7 +69,7 @@ from autocoder.loop import run
 @click.option(
     "--external-reviewer",
     default=None,
-    help="Second-opinion reviewer. Pass a preset name ('codex', 'gemini', 'claude') or a full shell command; prompt is piped on stdin. Examples: 'codex', 'codex exec -m gpt-5', 'claude -p --model claude-opus-4-6 --output-format text'.",
+    help="Second-opinion reviewer. Pass a preset name ('codex', 'gemini', 'claude') or a full shell command; prompt is piped on stdin. Examples: 'codex', 'codex exec -m gpt-5', 'claude -p --model claude-opus-4-8 --output-format text'.",
 )
 @click.option(
     "--implement-brief/--no-implement-brief",
@@ -150,8 +150,8 @@ from autocoder.loop import run
 )
 @click.option(
     "--escalation-model",
-    default="claude-opus-4-7",
-    help="Stronger Claude model used only for BLOCKED/NEEDS_CONTEXT in-attempt retries (default claude-opus-4-7).",
+    default="claude-opus-4-8",
+    help="Stronger Claude model used only for BLOCKED/NEEDS_CONTEXT in-attempt retries (default claude-opus-4-8).",
 )
 @click.option(
     "--ci-arch-review/--no-ci-arch-review",

@@ -114,7 +114,7 @@ class RunConfig:
     parallel: int = 1
     worktree_root: Optional[str] = None
     escalate_on_block: bool = True
-    escalation_model: str = "claude-opus-4-7"
+    escalation_model: str = "claude-opus-4-8"
     ci_arch_review: bool = True
 
 

@@ -55,3 +55,19 @@ def test_resolve_external_reviewer_raw_command_passes_through():
 
 def test_resolve_external_reviewer_unknown_single_token_passes_through():
     assert resolve_external_reviewer("unknownname") == ["unknownname"]
+
+
+def test_cli_model_defaults_are_current_generation():
+    from autocoder.cli import main
+
+    defaults = {p.name: p.default for p in main.params}
+    assert defaults["model"] == "claude-sonnet-5"
+    assert defaults["plan_model"] == "claude-opus-4-8"
+    assert defaults["review_model"] == "claude-opus-4-8"
+    assert defaults["escalation_model"] == "claude-opus-4-8"
+
+
+def test_runconfig_escalation_model_default():
+    from autocoder.types import RunConfig
+
+    assert RunConfig.__dataclass_fields__["escalation_model"].default == "claude-opus-4-8"

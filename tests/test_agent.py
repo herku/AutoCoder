@@ -247,6 +247,19 @@ def test_parse_status_case_insensitive_token():
     assert status is ImplementerStatus.DONE
 
 
+def test_parse_status_tolerates_angle_brackets():
+    # A literal-minded model may copy the template's <TOKEN> form verbatim.
+    status, detail = parse_status("STATUS: <DONE>: all tests pass")
+    assert status is ImplementerStatus.DONE
+    assert detail == "all tests pass"
+
+
+def test_parse_status_angle_bracket_compound_token():
+    # <DONE_WITH_CONCERNS> must not be misread as DONE.
+    status, _ = parse_status("STATUS: <DONE_WITH_CONCERNS>: flaky test")
+    assert status is ImplementerStatus.DONE_WITH_CONCERNS
+
+
 def test_parse_agent_output_propagates_status():
     data = {
         "session_id": "sess-7",

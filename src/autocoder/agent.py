@@ -18,7 +18,7 @@ from autocoder.types import (
 PROMPT_BODY_MAX = 4000
 
 _STATUS_RE = re.compile(
-    r"^[\s>*\-]*STATUS:\s*(DONE_WITH_CONCERNS|NEEDS_CONTEXT|BLOCKED|DONE)\b[\s:\-]*(.*)$",
+    r"^[\s>*\-]*STATUS:\s*<?\s*(DONE_WITH_CONCERNS|NEEDS_CONTEXT|BLOCKED|DONE)\b[\s:>\-]*(.*)$",
     re.IGNORECASE | re.MULTILINE,
 )
 
