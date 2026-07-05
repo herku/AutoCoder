@@ -546,8 +546,12 @@ def process_issue(
                     )
                 budget.record(brief_result)
                 telem.record_phase(Phase.IMPLEMENT_BRIEF, brief_result)
+                brief_out = (brief_result.result_text or "").strip()
                 if brief_result.is_error:
                     print(f"  Brief generation failed, continuing without brief: {brief_result.result_text[:100]}")
+                elif brief_out.startswith("BRIEF_FAILED") or not brief_out:
+                    # A wrong or empty brief is worse than none — don't prepend it.
+                    print(f"  Brief unusable, continuing without brief: {brief_out[:100] or '(empty)'}")
                 else:
                     brief_text = brief_result.result_text
 

@@ -204,7 +204,8 @@ def test_build_brief_prompt_has_placeholders_filled():
 
 def test_build_prompt_with_brief_appends_block():
     prompt = build_prompt(_make_issue(), brief="- Touch foo.py\n- Add test for empty input")
-    assert "Design brief from advisory agents:" in prompt
+    assert "Design brief from advisory agents" in prompt
+    assert "do NOT implement anything marked OUT" in prompt
     assert "Touch foo.py" in prompt
     assert "Add test for empty input" in prompt
 
@@ -219,7 +220,8 @@ def test_build_implement_prompt_with_brief():
         _make_issue(), plan_text="plan goes here", brief="- Brief item one",
     )
     assert "plan goes here" in prompt
-    assert "Design brief from advisory agents:" in prompt
+    assert "Design brief from advisory agents" in prompt
+    assert "do NOT implement anything marked OUT" in prompt
     assert "Brief item one" in prompt
 
 

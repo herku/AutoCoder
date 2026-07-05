@@ -258,6 +258,54 @@ def test_in_place_fix_records_verify_fix_phase():
     assert Phase.VERIFY_FIX in phases
 
 
+# ---------- brief failure signal ----------
+
+
+def test_process_issue_drops_failed_brief():
+    from autocoder.loop import process_issue, StepTimings
+
+    prompts: list[str] = []
+
+    def fake_invoke(prompt, *args, **kwargs):
+        prompts.append(prompt)
+        return _err_result("impl failed")
+
+    failed_brief = _result(text="BRIEF_FAILED: issue too vague to analyze")
+    cfg = _cfg(max_retries=1, pre_verify_critique=False, implement_brief=True)
+    with patch("autocoder.loop.generate_implement_brief", return_value=failed_brief), \
+         patch("autocoder.loop.invoke_agent", side_effect=fake_invoke), \
+         patch("autocoder.loop.label_failed"), \
+         patch("autocoder.loop.comment_failure"):
+        process_issue(_issue(), cfg, MagicMock(), _budget(), MagicMock(),
+                      StepTimings(), Telemetry())
+
+    # The implementer prompt must NOT carry the failed brief.
+    assert "Design brief" not in prompts[0]
+    assert "BRIEF_FAILED" not in prompts[0]
+
+
+def test_process_issue_prepends_usable_brief():
+    from autocoder.loop import process_issue, StepTimings
+
+    prompts: list[str] = []
+
+    def fake_invoke(prompt, *args, **kwargs):
+        prompts.append(prompt)
+        return _err_result("impl failed")
+
+    good_brief = _result(text="## Architecture\n- touch foo.py")
+    cfg = _cfg(max_retries=1, pre_verify_critique=False, implement_brief=True)
+    with patch("autocoder.loop.generate_implement_brief", return_value=good_brief), \
+         patch("autocoder.loop.invoke_agent", side_effect=fake_invoke), \
+         patch("autocoder.loop.label_failed"), \
+         patch("autocoder.loop.comment_failure"):
+        process_issue(_issue(), cfg, MagicMock(), _budget(), MagicMock(),
+                      StepTimings(), Telemetry())
+
+    assert "Design brief" in prompts[0]
+    assert "touch foo.py" in prompts[0]
+
+
 # ---------- prior-run failure seeding ----------
 
 

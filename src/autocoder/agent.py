@@ -86,7 +86,11 @@ def _error_block(ctx: str, message: str = "The previous attempt to fix this issu
 def _brief_block(brief: str) -> str:
     if not brief:
         return ""
-    return f"\n\nDesign brief from advisory agents:\n{brief}\n"
+    return (
+        "\n\nDesign brief from advisory agents (stay inside its Scope decisions"
+        " — do NOT implement anything marked OUT):\n"
+        f"{brief}\n"
+    )
 
 
 def format_commands_block(

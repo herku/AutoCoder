@@ -16,7 +16,7 @@ Issue **exactly 3 `Task` tool calls in a single assistant turn**. Do NOT use `ru
 Each sub-agent gets:
 - `subagent_type: "general-purpose"`
 - `description`: the role name (e.g. "Architecture advisor")
-- `prompt`: the role brief below, suffixed with `"Issue #{issue_number}: {issue_title}. Body: <same body as above>. Return a compact bullet list only."`
+- `prompt`: the role brief below, suffixed with `"Issue #{issue_number}: {issue_title}."`, then the FULL issue body copied verbatim from above (sub-agents cannot see this conversation), then `"Return a compact bullet list only."`
 
 Role briefs to spawn:
 
@@ -64,4 +64,10 @@ Re-read the brief once with fresh eyes:
 
 Fix issues inline. Do not emit the brief until all three checks pass.
 
-Output the brief directly. No preamble, no closing remarks. No signal lines.
+Output the brief directly. No preamble, no closing remarks, no signal lines on success.
+
+Exception: if you cannot produce a useful brief (issue too vague to analyze, codebase unreadable, advisors returned nothing usable), output exactly one line instead of a brief:
+
+    BRIEF_FAILED: <one-line reason>
+
+The orchestrator detects this and proceeds without a brief — a wrong or empty brief is worse than none.
