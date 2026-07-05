@@ -99,6 +99,7 @@ def build_config(
     escalation_model: str = "claude-opus-4-8",
     ci_arch_review: bool = True,
     verify_fix: bool = True,
+    testplan_enforce: bool = True,
 ) -> RunConfig:
     repo_path = str(Path(repo).resolve())
 
@@ -243,4 +244,5 @@ def build_config(
         escalation_model=escalation_model,
         ci_arch_review=ci_arch_review,
         verify_fix=verify_fix,
+        testplan_enforce=testplan_enforce,
     )

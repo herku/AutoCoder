@@ -642,7 +642,13 @@ def process_issue(
 
                 telem.record_testplan(test_plan)
 
-                if not test_plan.all_passed:
+                if test_plan.check_error and not test_plan.items:
+                    # Verifier infrastructure failure — warn, never gate on it.
+                    print(
+                        f"  Warning: test plan verifier failed ({test_plan.check_error}); "
+                        "proceeding without criteria gate."
+                    )
+                elif not test_plan.all_passed:
                     failed_items = [i for i in test_plan.items if i.status == "fail"]
                     print(f"  Test plan: {len(failed_items)} criteria not met. Fixing...")
                     for item in failed_items:
@@ -668,6 +674,22 @@ def process_issue(
                             raise VerificationError(failed.stage, error_context)
                         test_plan = verify_test_plan(issue, git.diff_full(), cfg.repo_path, cfg.model)
                         telem.record_testplan(test_plan)
+
+                    # Gate on the post-fix result: only affirmative "fail"
+                    # verdicts gate (a broken re-check has no items and is
+                    # warn-only above), so a flaky verifier can't sink a PR.
+                    still_failed = [i for i in test_plan.items if i.status == "fail"]
+                    if still_failed:
+                        summary = "; ".join(i.criterion[:100] for i in still_failed[:5])
+                        if cfg.testplan_enforce:
+                            error_context = (
+                                f"Acceptance criteria still unmet after fix attempt: {summary}"
+                            )
+                            raise VerificationError("testplan", error_context)
+                        print(
+                            f"  Warning: {len(still_failed)} acceptance criteria still "
+                            "unmet (enforcement disabled); proceeding."
+                        )
                 else:
                     print(f"  Test plan: all criteria met.")
 
@@ -768,6 +790,7 @@ def process_issue(
                     "lint": FailureCategory.LINT_FAIL,
                     "unit": FailureCategory.TEST_FAIL,
                     "integration": FailureCategory.INTEGRATION_FAIL,
+                    "testplan": FailureCategory.TESTPLAN_FAIL,
                 }
                 telem.record_failure(_stage_map.get(e.stage, FailureCategory.TEST_FAIL))
 

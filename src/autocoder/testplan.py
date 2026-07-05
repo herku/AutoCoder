@@ -18,13 +18,31 @@ def extract_acceptance_criteria(issue_body: str) -> list[str]:
     return [m.strip() for m in matches if m.strip()]
 
 
+def _invoke_verifier(prompt: str, repo_path: str, model: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["claude", "-p", "--model", model, "--output-format", "text"],
+        input=prompt,
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=180,
+    )
+
+
 def verify_test_plan(
     issue: Issue,
     diff: str,
     repo_path: str,
     model: str = "sonnet",
 ) -> TestPlanResult:
-    """Check if the diff addresses each acceptance criterion via claude -p."""
+    """Check if the diff addresses each acceptance criterion via claude -p.
+
+    Fails CLOSED: a broken verifier (non-zero exit, unparseable JSON after one
+    reformat retry) returns all_passed=False with check_error set, so callers
+    can distinguish "criteria unmet" from "verifier broke" — but a garbled
+    response can never silently count as criteria met.
+    """
     criteria = extract_acceptance_criteria(issue.body)
     if not criteria:
         return TestPlanResult(items=[], raw_response="", all_passed=True)
@@ -38,21 +56,32 @@ def verify_test_plan(
         diff=truncated_diff,
     )
 
-    result = subprocess.run(
-        ["claude", "-p", "--model", model, "--output-format", "text"],
-        input=prompt,
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=180,
-    )
-
+    result = _invoke_verifier(prompt, repo_path, model)
     if result.returncode != 0:
         print(f"  Warning: test plan verification failed ({result.returncode})", file=sys.stderr)
-        return TestPlanResult(items=[], raw_response="", all_passed=True)
+        return TestPlanResult(
+            items=[], raw_response=result.stdout + result.stderr,
+            all_passed=False, check_error=f"verifier exited {result.returncode}",
+        )
 
-    return parse_test_plan_response(result.stdout, criteria)
+    parsed = parse_test_plan_response(result.stdout, criteria)
+    if not parsed.check_error:
+        return parsed
+
+    # One reformat retry: the model produced prose/invalid JSON.
+    retry_prompt = (
+        prompt
+        + "\n\nYour previous response was not valid JSON:\n"
+        + result.stdout[:1000]
+        + "\n\nRespond with ONLY the JSON array. No prose, no markdown fences."
+    )
+    retry = _invoke_verifier(retry_prompt, repo_path, model)
+    if retry.returncode != 0:
+        return TestPlanResult(
+            items=[], raw_response=retry.stdout + retry.stderr,
+            all_passed=False, check_error=f"verifier exited {retry.returncode} on retry",
+        )
+    return parse_test_plan_response(retry.stdout, criteria)
 
 
 def parse_test_plan_response(raw: str, criteria: list[str]) -> TestPlanResult:
@@ -63,10 +92,16 @@ def parse_test_plan_response(raw: str, criteria: list[str]) -> TestPlanResult:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
         print("  Warning: could not parse test plan response as JSON", file=sys.stderr)
-        return TestPlanResult(items=[], raw_response=raw, all_passed=True)
+        return TestPlanResult(
+            items=[], raw_response=raw, all_passed=False,
+            check_error="unparseable verifier response",
+        )
 
     if not isinstance(data, list):
-        return TestPlanResult(items=[], raw_response=raw, all_passed=True)
+        return TestPlanResult(
+            items=[], raw_response=raw, all_passed=False,
+            check_error="verifier response was not a JSON array",
+        )
 
     items = []
     for entry in data:

@@ -117,6 +117,7 @@ class RunConfig:
     escalation_model: str = "claude-opus-4-8"
     ci_arch_review: bool = True
     verify_fix: bool = True
+    testplan_enforce: bool = True
 
 
 @dataclass
@@ -154,6 +155,10 @@ class TestPlanResult:
     items: list[PlanCheckItem]
     raw_response: str
     all_passed: bool
+    # Non-empty when the verifier itself broke (bad exit, unparseable JSON)
+    # rather than criteria affirmatively failing. Callers treat this as a
+    # warning, not a gate — but all_passed is False so it can't pass silently.
+    check_error: str = ""
 
 
 @dataclass

@@ -163,6 +163,11 @@ from autocoder.loop import run
     default=True,
     help="On a lint/unit/integration verification failure, run a focused in-place fix agent before rolling back the whole implementation (build failures always get this via --build-retries). Default: on.",
 )
+@click.option(
+    "--testplan-enforce/--no-testplan-enforce",
+    default=True,
+    help="Fail the attempt when acceptance criteria remain unmet after the test-plan fix pass (verifier infrastructure failures never gate). --no-testplan-enforce keeps the old warn-only behavior. Default: on.",
+)
 def main(**kwargs: object) -> None:
     """AutoCoder: Autonomous AI coding agent loop.
 

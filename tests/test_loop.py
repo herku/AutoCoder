@@ -257,6 +257,84 @@ def test_in_place_fix_records_verify_fix_phase():
     assert Phase.VERIFY_FIX in phases
 
 
+# ---------- testplan gating ----------
+
+
+def _failing_plan():
+    from autocoder.types import TestPlanResult, PlanCheckItem
+    return TestPlanResult(
+        items=[PlanCheckItem("crit one", "fail", "not addressed")],
+        raw_response="", all_passed=False,
+    )
+
+
+def test_process_issue_gates_on_unmet_acceptance_criteria():
+    from autocoder.loop import process_issue, StepTimings
+    from autocoder.telemetry import FailureCategory
+
+    telem = MagicMock()
+    log = MagicMock()
+    cfg = _cfg(max_retries=1, implement_brief=False, pre_verify_critique=False,
+               update_claude_md=False)
+    with patch("autocoder.loop.invoke_agent", return_value=_result()), \
+         patch("autocoder.loop.run_verification", return_value=[]), \
+         patch("autocoder.loop.verify_test_plan", return_value=_failing_plan()), \
+         patch("autocoder.loop.create_pr") as mock_pr, \
+         patch("autocoder.loop.label_failed"), \
+         patch("autocoder.loop.comment_failure"):
+        process_issue(_issue(body="Fix\n- [ ] crit one"), cfg, MagicMock(),
+                      _budget(), log, StepTimings(), telem)
+
+    telem.record_failure.assert_any_call(FailureCategory.TESTPLAN_FAIL)
+    log.dead_letter.assert_called_once()
+    mock_pr.assert_not_called()
+
+
+def test_process_issue_testplan_warn_only_when_enforcement_disabled():
+    from autocoder.loop import process_issue, StepTimings
+
+    log = MagicMock()
+    cfg = _cfg(max_retries=1, implement_brief=False, pre_verify_critique=False,
+               update_claude_md=False, testplan_enforce=False)
+    with patch("autocoder.loop.invoke_agent", return_value=_result()), \
+         patch("autocoder.loop.run_verification", return_value=[]), \
+         patch("autocoder.loop.verify_test_plan", return_value=_failing_plan()), \
+         patch("autocoder.loop.create_pr", return_value="http://pr/1") as mock_pr, \
+         patch("autocoder.loop.label_failed"), \
+         patch("autocoder.loop.comment_failure"):
+        process_issue(_issue(body="Fix\n- [ ] crit one"), cfg, MagicMock(),
+                      _budget(), log, StepTimings(), MagicMock())
+
+    mock_pr.assert_called_once()
+    log.dead_letter.assert_not_called()
+
+
+def test_process_issue_verifier_infrastructure_failure_never_gates():
+    from autocoder.loop import process_issue, StepTimings
+    from autocoder.types import TestPlanResult
+
+    broken = TestPlanResult(items=[], raw_response="", all_passed=False,
+                            check_error="verifier exited 2")
+    log = MagicMock()
+    cfg = _cfg(max_retries=1, implement_brief=False, pre_verify_critique=False,
+               update_claude_md=False)
+    with patch("autocoder.loop.invoke_agent", return_value=_result()) as mock_invoke, \
+         patch("autocoder.loop.run_verification", return_value=[]), \
+         patch("autocoder.loop.verify_test_plan", return_value=broken), \
+         patch("autocoder.loop.create_pr", return_value="http://pr/1") as mock_pr, \
+         patch("autocoder.loop.label_failed"), \
+         patch("autocoder.loop.comment_failure"):
+        process_issue(_issue(body="Fix\n- [ ] crit one"), cfg, MagicMock(),
+                      _budget(), log, StepTimings(), MagicMock())
+
+    mock_pr.assert_called_once()
+    log.dead_letter.assert_not_called()
+    # No testplan-fix agent should run for an infrastructure failure:
+    # only the implementer and the impl-learn agent are invoked.
+    prompts = [c.args[0] for c in mock_invoke.call_args_list]
+    assert not any("crit one" in p and "fail" in p.lower() for p in prompts[1:2])
+
+
 # ---------- implement retry-context accumulation ----------
 
 

@@ -64,10 +64,66 @@ def test_parse_response_mixed():
     assert result.items[1].status == "fail"
 
 
-def test_parse_response_invalid_json():
+def test_parse_response_invalid_json_fails_closed():
     result = parse_test_plan_response("not json", ["Add colors"])
-    assert result.all_passed  # Don't block on parse failure
+    # A garbled verifier response must never silently count as criteria met.
+    assert not result.all_passed
+    assert result.check_error
     assert result.items == []
+
+
+def test_parse_response_non_list_json_fails_closed():
+    result = parse_test_plan_response('{"criterion": "X"}', ["X"])
+    assert not result.all_passed
+    assert result.check_error
+
+
+def test_verify_test_plan_nonzero_exit_fails_closed(monkeypatch):
+    import subprocess as sp
+    from autocoder import testplan as tp
+
+    issue = Issue(1, "T", "- [ ] crit one", [], Priority.P2, "")
+    monkeypatch.setattr(
+        tp, "_invoke_verifier",
+        lambda *a, **k: sp.CompletedProcess([], returncode=2, stdout="", stderr="boom"),
+    )
+    result = tp.verify_test_plan(issue, "diff", "/tmp")
+    assert not result.all_passed
+    assert "exited 2" in result.check_error
+
+
+def test_verify_test_plan_retries_once_on_parse_failure(monkeypatch):
+    import subprocess as sp
+    from autocoder import testplan as tp
+
+    issue = Issue(1, "T", "- [ ] crit one", [], Priority.P2, "")
+    good = json.dumps([{"criterion": "crit one", "status": "pass", "evidence": "e"}])
+    responses = iter(["Sure! Here is my analysis in prose.", good])
+    calls = {"n": 0}
+
+    def fake_invoke(prompt, repo_path, model):
+        calls["n"] += 1
+        return sp.CompletedProcess([], returncode=0, stdout=next(responses), stderr="")
+
+    monkeypatch.setattr(tp, "_invoke_verifier", fake_invoke)
+    result = tp.verify_test_plan(issue, "diff", "/tmp")
+    assert calls["n"] == 2
+    assert result.all_passed
+    assert not result.check_error
+
+
+def test_verify_test_plan_unparseable_after_retry_fails_closed(monkeypatch):
+    import subprocess as sp
+    from autocoder import testplan as tp
+
+    issue = Issue(1, "T", "- [ ] crit one", [], Priority.P2, "")
+    monkeypatch.setattr(
+        tp, "_invoke_verifier",
+        lambda *a, **k: sp.CompletedProcess([], returncode=0, stdout="still prose", stderr=""),
+    )
+    result = tp.verify_test_plan(issue, "diff", "/tmp")
+    assert not result.all_passed
+    assert result.check_error
 
 
 def test_parse_response_markdown_fences():
