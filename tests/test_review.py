@@ -111,6 +111,19 @@ def test_review_template_has_placeholders():
     assert "critical" in template.lower()
 
 
+def test_build_verify_fix_prompt_fills_placeholders():
+    from autocoder.review import build_verify_fix_prompt
+    prompt = build_verify_fix_prompt(
+        "unit", "FAILED tests/test_a.py::test_b", "uv run pytest",
+    )
+    assert "unit" in prompt
+    assert "FAILED tests/test_a.py::test_b" in prompt
+    assert "`uv run pytest`" in prompt
+    assert "root cause" in prompt.lower()
+    # Anti-cheat guardrails must be present
+    assert "Do NOT delete or comment out existing tests" in prompt
+
+
 # ---------- multi-agent review ----------
 
 

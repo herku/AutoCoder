@@ -15,7 +15,7 @@ from autocoder.agent import (
     build_update_claude_md_prompt, build_ci_learn_prompt, build_impl_learn_prompt,
     generate_implement_brief,
     invoke_agent, set_rate_limit_wait, set_timeouts,
-    TIMEOUT_PLAN, TIMEOUT_IMPLEMENT, TIMEOUT_BUILD_FIX,
+    TIMEOUT_PLAN, TIMEOUT_IMPLEMENT, TIMEOUT_BUILD_FIX, TIMEOUT_VERIFY_FIX,
     TIMEOUT_CLAUDE_MD, BUDGET_CLAUDE_MD, BUDGET_CI_LEARN, BUDGET_IMPL_LEARN,
 )
 from autocoder import task_slice
@@ -28,6 +28,7 @@ from autocoder.logger import RunLogger
 from autocoder.pr import comment_failure, create_pr, label_failed, mark_ready, merge_pr, wait_for_ci, wait_for_new_checks
 from autocoder.review import (
     build_build_fix_prompt, build_ci_fix_prompt, build_ci_fix_arch_prompt,
+    build_verify_fix_prompt,
     build_fix_prompt, merge_reviews, review_and_fix_multi, review_pr_diff,
     run_external_review,
 )
@@ -384,6 +385,63 @@ def _handle_implementer_status(
     return escalated
 
 
+def _attempt_in_place_fix(
+    verify_results: list, cfg: RunConfig, budget: BudgetTracker, telem: Telemetry,
+    sandbox: SandboxConfig, timings: StepTimings, tag: str, att: str,
+) -> list:
+    """Run a focused in-place fix for the first failed verification stage,
+    then re-verify.
+
+    build → build_fix prompt (short cap); lint/unit/integration → verify_fix
+    prompt (longer cap, disabled via --no-verify-fix). Historically only build
+    failures got an in-place fix — every other stage rolled back the entire
+    implementation and re-implemented from scratch.
+
+    Returns the post-fix verification results, or the original failing
+    results when the fix could not run or errored. Rollback/retry policy
+    stays with the caller.
+    """
+    failed = next(v for v in verify_results if not v.passed)
+    if failed.stage == "build":
+        print(f"  Build failed. Attempting fix...")
+        prompt = build_build_fix_prompt(
+            format_failure(failed), cfg.build_cmd or "", cfg.repo_path,
+        )
+        phase, timeout, label = Phase.BUILD_FIX, TIMEOUT_BUILD_FIX, "build_fix"
+    elif cfg.verify_fix and failed.stage in ("lint", "unit", "integration"):
+        stage_cmds = {
+            "lint": cfg.lint_cmd, "unit": cfg.test_cmd,
+            "integration": cfg.integration_cmd,
+        }
+        print(f"  {failed.stage} verification failed. Attempting in-place fix...")
+        prompt = build_verify_fix_prompt(
+            failed.stage, format_failure(failed),
+            stage_cmds.get(failed.stage) or "", cfg.repo_path,
+        )
+        phase, timeout, label = Phase.VERIFY_FIX, TIMEOUT_VERIFY_FIX, "verify_fix"
+    else:
+        return verify_results
+
+    with StepTimer(f"{label} {tag} {att}", timings):
+        max_budget = budget.remaining_for_issue_usd(cfg.model)
+        fix_result = invoke_agent(
+            prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox,
+            timeout=timeout,
+        )
+    budget.record(fix_result)
+    telem.record_phase(phase, fix_result)
+
+    if fix_result.is_error:
+        print(f"  {label} agent errored; keeping original failure.")
+        return verify_results
+
+    print(f"  Re-verifying after {label}...")
+    with StepTimer(f"re_verify {tag} {att}", timings):
+        new_results = run_verification(cfg)
+    telem.record_verify(new_results)
+    return new_results
+
+
 _IMPL_ATTEMPTS_KEPT = 3
 _IMPL_ATTEMPT_MAX = 2_000
 
@@ -564,31 +622,13 @@ def process_issue(
             telem.record_verify(verify_results)
 
             if not all(v.passed for v in verify_results):
-                failed = next(v for v in verify_results if not v.passed)
-                if failed.stage == "build":
-                    # Stage 4a: Attempt focused build fix before giving up
-                    print(f"  Build failed. Attempting fix...")
-                    with StepTimer(f"build_fix {tag} {att}", timings):
-                        fix_prompt = build_build_fix_prompt(format_failure(failed), cfg.build_cmd or "", cfg.repo_path)
-                        max_budget = budget.remaining_for_issue_usd(cfg.model)
-                        fix_result = invoke_agent(
-                            fix_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox,
-                            timeout=TIMEOUT_BUILD_FIX,
-                        )
-                    budget.record(fix_result)
-                    telem.record_phase(Phase.BUILD_FIX, fix_result)
-
-                    if not fix_result.is_error:
-                        print(f"  Re-verifying after build fix...")
-                        with StepTimer(f"re_verify {tag} {att}", timings):
-                            verify_results = run_verification(cfg)
-                        telem.record_verify(verify_results)
-
-                    if fix_result.is_error or not all(v.passed for v in verify_results):
-                        failed = next((v for v in verify_results if not v.passed), failed)
-                        error_context = format_failure(failed)
-                        raise VerificationError(failed.stage, error_context)
-                else:
+                # Stage 4a: focused in-place fix (build_fix or verify_fix)
+                # before discarding the whole implementation.
+                verify_results = _attempt_in_place_fix(
+                    verify_results, cfg, budget, telem, sandbox, timings, tag, att,
+                )
+                if not all(v.passed for v in verify_results):
+                    failed = next(v for v in verify_results if not v.passed)
                     error_context = format_failure(failed)
                     raise VerificationError(failed.stage, error_context)
 

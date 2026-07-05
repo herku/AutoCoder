@@ -116,6 +116,7 @@ class RunConfig:
     escalate_on_block: bool = True
     escalation_model: str = "claude-opus-4-8"
     ci_arch_review: bool = True
+    verify_fix: bool = True
 
 
 @dataclass

@@ -139,6 +139,17 @@ def build_build_fix_prompt(build_output: str, build_cmd: str = "", repo_path: st
     return load("build_fix", repo_path or None).format(build_output=truncated, build_cmd=build_cmd or "unknown")
 
 
+def build_verify_fix_prompt(
+    stage: str, verify_output: str, verify_cmd: str = "", repo_path: str = "",
+) -> str:
+    """Build a prompt for the focused in-place fix of a lint/unit/integration
+    verification failure (the build stage has its own build_fix prompt)."""
+    truncated = _truncate_output(verify_output, BUILD_OUTPUT_MAX)
+    return load("verify_fix", repo_path or None).format(
+        stage=stage, verify_output=truncated, verify_cmd=verify_cmd or "unknown",
+    )
+
+
 def build_ci_fix_arch_prompt(
     ci_output: str, previous_attempts: str, repo_path: str = "",
 ) -> str:

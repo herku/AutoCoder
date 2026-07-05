@@ -158,6 +158,11 @@ from autocoder.loop import run
     default=True,
     help="When CI-fix attempts approach the stalemate threshold, run an architectural critique to question the pattern instead of patching again. Default: on.",
 )
+@click.option(
+    "--verify-fix/--no-verify-fix",
+    default=True,
+    help="On a lint/unit/integration verification failure, run a focused in-place fix agent before rolling back the whole implementation (build failures always get this via --build-retries). Default: on.",
+)
 def main(**kwargs: object) -> None:
     """AutoCoder: Autonomous AI coding agent loop.
 

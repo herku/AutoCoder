@@ -52,6 +52,8 @@ def test_new_phases_registered():
     assert Phase.REVIEW_SPEC_COMPLIANCE.value == "review_spec_compliance"
     assert Phase.REVIEW_QUALITY.value == "review_quality"
     assert Phase.CI_FIX_ARCH.value == "ci_fix_arch"
+    # In-place verify fix for lint/unit/integration failures
+    assert Phase.VERIFY_FIX.value == "verify_fix"
 
 
 # ---------- implementer status branching ----------
@@ -168,6 +170,93 @@ def test_blocked_with_escalation_disabled_raises():
         )
 
 
+# ---------- in-place verify fix ----------
+
+
+def _verify_fail(stage: str, output: str = "boom"):
+    from autocoder.types import VerifyResult
+    return VerifyResult(passed=False, stage=stage, exit_code=1,
+                        stdout=output, stderr="", duration_ms=1)
+
+
+def _verify_pass(stage: str):
+    from autocoder.types import VerifyResult
+    return VerifyResult(passed=True, stage=stage, exit_code=0,
+                        stdout="", stderr="", duration_ms=1)
+
+
+def test_in_place_fix_unit_failure_invokes_verify_fix_and_reverifies():
+    from autocoder.loop import _attempt_in_place_fix
+    failing = [_verify_fail("unit", "FAILED test_x - AssertionError")]
+    fixed = [_verify_pass("unit")]
+    cfg = _cfg(test_cmd="uv run pytest")
+    with patch("autocoder.loop.invoke_agent", return_value=_result()) as mock_invoke, \
+         patch("autocoder.loop.run_verification", return_value=fixed):
+        out = _attempt_in_place_fix(
+            failing, cfg, _budget(), _telem_with_issue(), _sbx(), _timings(),
+            "#1", "att1",
+        )
+    assert all(v.passed for v in out)
+    prompt = mock_invoke.call_args.args[0]
+    assert "unit" in prompt
+    assert "uv run pytest" in prompt
+    assert "FAILED test_x" in prompt
+
+
+def test_in_place_fix_agent_error_keeps_original_failure():
+    from autocoder.loop import _attempt_in_place_fix
+    failing = [_verify_fail("lint")]
+    err = _result()
+    err.is_error = True
+    with patch("autocoder.loop.invoke_agent", return_value=err), \
+         patch("autocoder.loop.run_verification") as mock_verify:
+        out = _attempt_in_place_fix(
+            failing, _cfg(), _budget(), _telem_with_issue(), _sbx(), _timings(),
+            "#1", "att1",
+        )
+    assert out is failing
+    mock_verify.assert_not_called()
+
+
+def test_in_place_fix_build_failure_uses_build_fix_prompt():
+    from autocoder.loop import _attempt_in_place_fix
+    failing = [_verify_fail("build", "error: undefined symbol")]
+    with patch("autocoder.loop.invoke_agent", return_value=_result()) as mock_invoke, \
+         patch("autocoder.loop.run_verification", return_value=[_verify_pass("build")]):
+        _attempt_in_place_fix(
+            failing, _cfg(build_cmd="make build"), _budget(), _telem_with_issue(),
+            _sbx(), _timings(), "#1", "att1",
+        )
+    prompt = mock_invoke.call_args.args[0]
+    assert "The build failed" in prompt
+    assert "make build" in prompt
+
+
+def test_in_place_fix_disabled_returns_unchanged_without_agent():
+    from autocoder.loop import _attempt_in_place_fix
+    failing = [_verify_fail("unit")]
+    with patch("autocoder.loop.invoke_agent") as mock_invoke:
+        out = _attempt_in_place_fix(
+            failing, _cfg(verify_fix=False), _budget(), _telem_with_issue(),
+            _sbx(), _timings(), "#1", "att1",
+        )
+    assert out is failing
+    mock_invoke.assert_not_called()
+
+
+def test_in_place_fix_records_verify_fix_phase():
+    from autocoder.loop import _attempt_in_place_fix
+    telem = _telem_with_issue()
+    with patch("autocoder.loop.invoke_agent", return_value=_result()), \
+         patch("autocoder.loop.run_verification", return_value=[_verify_pass("unit")]):
+        _attempt_in_place_fix(
+            [_verify_fail("unit")], _cfg(), _budget(), telem, _sbx(), _timings(),
+            "#1", "att1",
+        )
+    phases = [p.phase for p in telem._get_current().phases]
+    assert Phase.VERIFY_FIX in phases
+
+
 # ---------- implement retry-context accumulation ----------
 
 
@@ -232,7 +321,10 @@ def test_process_issue_latest_failure_not_lost_after_earlier_verify_failure():
     failing = [VerifyResult(passed=False, stage="unit", exit_code=1,
                             stdout="assert failed in test_foo_bar", stderr="",
                             duration_ms=1)]
-    cfg = _cfg(max_retries=3, implement_brief=False, pre_verify_critique=False)
+    # verify_fix disabled: this test targets retry-context accumulation, so
+    # keep exactly one agent call per attempt.
+    cfg = _cfg(max_retries=3, implement_brief=False, pre_verify_critique=False,
+               verify_fix=False)
     with patch("autocoder.loop.invoke_agent", side_effect=fake_invoke), \
          patch("autocoder.loop.run_verification", return_value=failing), \
          patch("autocoder.loop.label_failed"), \
