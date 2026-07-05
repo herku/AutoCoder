@@ -161,6 +161,31 @@ class RunLogger:
             record["tokens_out"] = telemetry.total_tokens_out
         self._append(self._dead_letter_path, record)
 
+    def prior_failures(self, issue_num: int, limit: int = 2) -> list[str]:
+        """Summaries of past dead-letter records for this issue (any run).
+
+        Lets a re-run start with the knowledge of how the issue failed
+        before instead of repeating the same doomed approach. Most recent
+        entries last; malformed lines are skipped.
+        """
+        if not self._dead_letter_path.exists():
+            return []
+        out: list[str] = []
+        with open(self._dead_letter_path) as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("issue_num") != issue_num:
+                    continue
+                prefix = " / ".join(
+                    str(rec[k]) for k in ("failure_category", "last_phase") if rec.get(k)
+                )
+                error = rec.get("error", "")
+                out.append(f"[{prefix}] {error}" if prefix else error)
+        return out[-limit:]
+
     def log_run_summary(self, telem: Telemetry) -> None:
         from autocoder.telemetry import Telemetry as _T  # noqa: runtime import
         summary = telem.run_summary()

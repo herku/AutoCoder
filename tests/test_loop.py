@@ -258,6 +258,32 @@ def test_in_place_fix_records_verify_fix_phase():
     assert Phase.VERIFY_FIX in phases
 
 
+# ---------- prior-run failure seeding ----------
+
+
+def test_process_issue_seeds_context_from_dead_letter_history():
+    from autocoder.loop import process_issue, StepTimings
+
+    prompts: list[str] = []
+
+    def fake_invoke(prompt, *args, **kwargs):
+        prompts.append(prompt)
+        return _err_result("fresh failure")
+
+    log = MagicMock()
+    log.prior_failures.return_value = ["[test_fail / implement] tests kept failing on flaky_spec"]
+    cfg = _cfg(max_retries=1, implement_brief=False, pre_verify_critique=False)
+    with patch("autocoder.loop.invoke_agent", side_effect=fake_invoke), \
+         patch("autocoder.loop.label_failed"), \
+         patch("autocoder.loop.comment_failure"):
+        process_issue(_issue(), cfg, MagicMock(), _budget(), log,
+                      StepTimings(), Telemetry())
+
+    # The very first attempt already knows how the previous run died.
+    assert "previous AutoCoder run failed" in prompts[0]
+    assert "flaky_spec" in prompts[0]
+
+
 # ---------- budget exhaustion guard ----------
 
 

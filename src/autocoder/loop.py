@@ -466,6 +466,7 @@ def _attempt_in_place_fix(
 
 _IMPL_ATTEMPTS_KEPT = 3
 _IMPL_ATTEMPT_MAX = 2_000
+_PRIOR_FAILURE_MAX = 1_000
 
 
 def _format_impl_attempt(attempt: int, error: str) -> str:
@@ -479,8 +480,19 @@ def process_issue(
 ) -> None:
     # Every failed attempt is appended here so later attempts see what was
     # already tried — a single scalar context loses the history (and used to
-    # go stale when a later attempt failed without setting it).
+    # go stale when a later attempt failed without setting it). Seeded with
+    # dead-letter records from previous runs so a re-run doesn't repeat the
+    # same doomed approach.
     attempt_failures: list[str] = []
+    try:
+        priors = list(log.prior_failures(issue.number))
+    except Exception:
+        priors = []
+    for prior in priors:
+        attempt_failures.append(
+            "## A previous AutoCoder run failed on this issue\n"
+            f"{prior[:_PRIOR_FAILURE_MAX]}\n---"
+        )
     agent_result = None
     verify_results = []
     build_failures = 0
