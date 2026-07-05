@@ -40,6 +40,39 @@ def test_extract_criteria_mixed():
     assert "Third with asterisk" in result[2]
 
 
+def test_extract_criteria_plain_bullets_under_heading():
+    body = (
+        "## Description\nSome text\n\n"
+        "## Acceptance Criteria\n"
+        "- API returns 200 for valid input\n"
+        "- Invalid input returns 422\n\n"
+        "## Notes\n- This bullet is NOT a criterion\n"
+    )
+    result = extract_acceptance_criteria(body)
+    assert result == ["API returns 200 for valid input", "Invalid input returns 422"]
+
+
+def test_extract_criteria_numbered_under_heading():
+    body = "### Definition of Done\n1. Docs updated\n2) Tests added\n"
+    result = extract_acceptance_criteria(body)
+    assert result == ["Docs updated", "Tests added"]
+
+
+def test_extract_criteria_checkboxes_win_over_heading_fallback():
+    body = (
+        "## Acceptance Criteria\n"
+        "- plain bullet ignored when checkboxes exist\n\n"
+        "- [ ] the real criterion\n"
+    )
+    result = extract_acceptance_criteria(body)
+    assert result == ["the real criterion"]
+
+
+def test_extract_criteria_bullets_without_heading_ignored():
+    body = "Some intro\n- just a regular list\n- of things\n"
+    assert extract_acceptance_criteria(body) == []
+
+
 def test_parse_response_all_pass():
     criteria = ["Add colors", "Add fonts"]
     raw = json.dumps([

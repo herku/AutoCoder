@@ -12,10 +12,35 @@ from autocoder.types import Issue, PlanCheckItem, TestPlanResult
 TESTPLAN_DIFF_MAX = 50_000
 
 
+_CRITERIA_HEADING_RE = re.compile(
+    r"^#{1,6}\s*(?:acceptance criteria|success criteria|definition of done)\b.*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_NEXT_HEADING_RE = re.compile(r"^#{1,6}\s", re.MULTILINE)
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*]|\d+[.)])\s+(.+)$", re.MULTILINE)
+
+
 def extract_acceptance_criteria(issue_body: str) -> list[str]:
-    """Extract checkbox items (- [ ] or * [ ]) from the issue body."""
+    """Extract acceptance criteria from the issue body.
+
+    Checkboxes (- [ ] / * [ ]) anywhere in the body win. When there are
+    none, fall back to plain bullet / numbered items under an
+    "Acceptance Criteria" (or "Success Criteria" / "Definition of Done")
+    heading — a very common style that previously yielded zero criteria,
+    silently skipping test-plan verification.
+    """
     matches = re.findall(r"^[-*]\s*\[[ xX]\]\s*(.+)$", issue_body, re.MULTILINE)
-    return [m.strip() for m in matches if m.strip()]
+    if matches:
+        return [m.strip() for m in matches if m.strip()]
+
+    heading = _CRITERIA_HEADING_RE.search(issue_body)
+    if not heading:
+        return []
+    section = issue_body[heading.end():]
+    next_heading = _NEXT_HEADING_RE.search(section)
+    if next_heading:
+        section = section[:next_heading.start()]
+    return [m.strip() for m in _LIST_ITEM_RE.findall(section) if m.strip()]
 
 
 def _invoke_verifier(prompt: str, repo_path: str, model: str) -> subprocess.CompletedProcess:
