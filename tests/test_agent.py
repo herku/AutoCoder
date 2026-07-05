@@ -334,3 +334,21 @@ def test_generate_implement_brief_calls_invoke_agent():
     # The prompt arg should include the issue title
     call_prompt = mock_invoke.call_args[0][0]
     assert "Fix widget crash" in call_prompt
+
+
+def test_format_discussion_block_keeps_latest_comments():
+    from autocoder.agent import format_discussion_block, DISCUSSION_MAX_COMMENTS
+
+    comments = [f"user: comment {i}" for i in range(20)]
+    block = format_discussion_block(comments)
+    assert "comment 19" in block
+    assert "comment 5" not in block  # older than the last 10
+    assert format_discussion_block([]) == ""
+
+
+def test_build_prompt_includes_discussion_block():
+    prompt = build_prompt(
+        _make_issue(),
+        discussion_block="\n## Issue discussion\n- alice: use v2 endpoint\n",
+    )
+    assert "use v2 endpoint" in prompt

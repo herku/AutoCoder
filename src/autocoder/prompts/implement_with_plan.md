@@ -2,7 +2,7 @@
 
 Issue body:
 {body}
-{acceptance_criteria_block}{commands_block}
+{acceptance_criteria_block}{commands_block}{discussion_block}
 --- IMPLEMENTATION PLAN ---
 Follow this plan that was created after analyzing the codebase:
 
