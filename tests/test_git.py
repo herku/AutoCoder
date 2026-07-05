@@ -84,7 +84,9 @@ def test_lockfile(git_repo):
 
 def test_cleanup_orphan_branches(git_repo):
     git = GitOps(git_repo)
-    for branch in ("ai/issue-99", "feat/42-fix-bug"):
+    autocoder_branches = ("ai/issue-99", "feat/42-fix-bug", "feat/7", "autocoder-wt-x-3")
+    human_branches = ("feat/nice-ui", "feat/refactor-auth")
+    for branch in autocoder_branches + human_branches:
         subprocess.run(
             ["git", "checkout", "-b", branch],
             cwd=git_repo, capture_output=True, check=True,
@@ -94,9 +96,14 @@ def test_cleanup_orphan_branches(git_repo):
         cwd=git_repo, capture_output=True, check=True,
     )
     git.cleanup_orphan_branches()
-    for pattern in ("ai/*", "feat/*"):
-        result = subprocess.run(
-            ["git", "branch", "--list", pattern],
-            cwd=git_repo, capture_output=True, text=True, check=True,
-        )
-        assert result.stdout.strip() == ""
+    result = subprocess.run(
+        ["git", "branch", "--list", "--format=%(refname:short)"],
+        cwd=git_repo, capture_output=True, text=True, check=True,
+    )
+    remaining = set(result.stdout.split())
+    # AutoCoder-shaped branches removed...
+    for branch in autocoder_branches:
+        assert branch not in remaining
+    # ...human feat/ branches untouched.
+    for branch in human_branches:
+        assert branch in remaining

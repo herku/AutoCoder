@@ -12,10 +12,47 @@ from autocoder.types import Issue, PlanCheckItem, TestPlanResult
 TESTPLAN_DIFF_MAX = 50_000
 
 
+_CRITERIA_HEADING_RE = re.compile(
+    r"^#{1,6}\s*(?:acceptance criteria|success criteria|definition of done)\b.*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_NEXT_HEADING_RE = re.compile(r"^#{1,6}\s", re.MULTILINE)
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*]|\d+[.)])\s+(.+)$", re.MULTILINE)
+
+
 def extract_acceptance_criteria(issue_body: str) -> list[str]:
-    """Extract checkbox items (- [ ] or * [ ]) from the issue body."""
+    """Extract acceptance criteria from the issue body.
+
+    Checkboxes (- [ ] / * [ ]) anywhere in the body win. When there are
+    none, fall back to plain bullet / numbered items under an
+    "Acceptance Criteria" (or "Success Criteria" / "Definition of Done")
+    heading — a very common style that previously yielded zero criteria,
+    silently skipping test-plan verification.
+    """
     matches = re.findall(r"^[-*]\s*\[[ xX]\]\s*(.+)$", issue_body, re.MULTILINE)
-    return [m.strip() for m in matches if m.strip()]
+    if matches:
+        return [m.strip() for m in matches if m.strip()]
+
+    heading = _CRITERIA_HEADING_RE.search(issue_body)
+    if not heading:
+        return []
+    section = issue_body[heading.end():]
+    next_heading = _NEXT_HEADING_RE.search(section)
+    if next_heading:
+        section = section[:next_heading.start()]
+    return [m.strip() for m in _LIST_ITEM_RE.findall(section) if m.strip()]
+
+
+def _invoke_verifier(prompt: str, repo_path: str, model: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["claude", "-p", "--model", model, "--output-format", "text"],
+        input=prompt,
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=180,
+    )
 
 
 def verify_test_plan(
@@ -24,7 +61,13 @@ def verify_test_plan(
     repo_path: str,
     model: str = "sonnet",
 ) -> TestPlanResult:
-    """Check if the diff addresses each acceptance criterion via claude -p."""
+    """Check if the diff addresses each acceptance criterion via claude -p.
+
+    Fails CLOSED: a broken verifier (non-zero exit, unparseable JSON after one
+    reformat retry) returns all_passed=False with check_error set, so callers
+    can distinguish "criteria unmet" from "verifier broke" — but a garbled
+    response can never silently count as criteria met.
+    """
     criteria = extract_acceptance_criteria(issue.body)
     if not criteria:
         return TestPlanResult(items=[], raw_response="", all_passed=True)
@@ -38,21 +81,32 @@ def verify_test_plan(
         diff=truncated_diff,
     )
 
-    result = subprocess.run(
-        ["claude", "-p", "--model", model, "--output-format", "text"],
-        input=prompt,
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=180,
-    )
-
+    result = _invoke_verifier(prompt, repo_path, model)
     if result.returncode != 0:
         print(f"  Warning: test plan verification failed ({result.returncode})", file=sys.stderr)
-        return TestPlanResult(items=[], raw_response="", all_passed=True)
+        return TestPlanResult(
+            items=[], raw_response=result.stdout + result.stderr,
+            all_passed=False, check_error=f"verifier exited {result.returncode}",
+        )
 
-    return parse_test_plan_response(result.stdout, criteria)
+    parsed = parse_test_plan_response(result.stdout, criteria)
+    if not parsed.check_error:
+        return parsed
+
+    # One reformat retry: the model produced prose/invalid JSON.
+    retry_prompt = (
+        prompt
+        + "\n\nYour previous response was not valid JSON:\n"
+        + result.stdout[:1000]
+        + "\n\nRespond with ONLY the JSON array. No prose, no markdown fences."
+    )
+    retry = _invoke_verifier(retry_prompt, repo_path, model)
+    if retry.returncode != 0:
+        return TestPlanResult(
+            items=[], raw_response=retry.stdout + retry.stderr,
+            all_passed=False, check_error=f"verifier exited {retry.returncode} on retry",
+        )
+    return parse_test_plan_response(retry.stdout, criteria)
 
 
 def parse_test_plan_response(raw: str, criteria: list[str]) -> TestPlanResult:
@@ -63,10 +117,16 @@ def parse_test_plan_response(raw: str, criteria: list[str]) -> TestPlanResult:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
         print("  Warning: could not parse test plan response as JSON", file=sys.stderr)
-        return TestPlanResult(items=[], raw_response=raw, all_passed=True)
+        return TestPlanResult(
+            items=[], raw_response=raw, all_passed=False,
+            check_error="unparseable verifier response",
+        )
 
     if not isinstance(data, list):
-        return TestPlanResult(items=[], raw_response=raw, all_passed=True)
+        return TestPlanResult(
+            items=[], raw_response=raw, all_passed=False,
+            check_error="verifier response was not a JSON array",
+        )
 
     items = []
     for entry in data:

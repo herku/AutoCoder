@@ -394,3 +394,28 @@ def test_force_bypasses_cache(mock_run, tmp_path):
     assert mock_run.call_count == 1
     analyze_and_prioritize(_make_issues(), str(tmp_path), "sonnet", force=True)
     assert mock_run.call_count == 2
+
+
+def test_fetch_issue_comments_parses_author_and_body():
+    from autocoder.issues import fetch_issue_comments
+
+    payload = json.dumps({"comments": [
+        {"author": {"login": "alice"}, "body": "Use the v2 endpoint instead."},
+        {"author": {"login": "bob"}, "body": "  "},
+        {"author": None, "body": "drive-by note"},
+    ]})
+    proc = MagicMock(returncode=0, stdout=payload)
+    with patch("autocoder.issues.subprocess.run", return_value=proc):
+        comments = fetch_issue_comments("/tmp/x", 7)
+    assert comments[0] == "alice: Use the v2 endpoint instead."
+    # Blank bodies dropped; missing author tolerated.
+    assert len(comments) == 2
+
+
+def test_fetch_issue_comments_failures_return_empty():
+    from autocoder.issues import fetch_issue_comments
+
+    with patch("autocoder.issues.subprocess.run", return_value=MagicMock(returncode=1, stdout="")):
+        assert fetch_issue_comments("/tmp/x", 7) == []
+    with patch("autocoder.issues.subprocess.run", return_value=MagicMock(returncode=0, stdout="not json")):
+        assert fetch_issue_comments("/tmp/x", 7) == []

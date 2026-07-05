@@ -2,7 +2,7 @@
 
 Issue body:
 {body}
-
+{acceptance_criteria_block}{commands_block}{discussion_block}
 Instructions:
 - Read relevant source files before making changes
 - Write or update tests that verify your fix
@@ -29,7 +29,9 @@ Skipping a verification step and claiming DONE is a failure mode. Evidence first
 
 End your reply with EXACTLY one line of the form:
 
-    STATUS: <DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT>: <one-line detail>
+    STATUS: DONE: <one-line detail>
+
+where the token after `STATUS:` is exactly one of: DONE, DONE_WITH_CONCERNS, BLOCKED, NEEDS_CONTEXT (no angle brackets, no other decoration).
 
 Use:
 - **DONE** — implementation complete, all verification passed (with quoted output above).

@@ -114,8 +114,10 @@ class RunConfig:
     parallel: int = 1
     worktree_root: Optional[str] = None
     escalate_on_block: bool = True
-    escalation_model: str = "claude-opus-4-7"
+    escalation_model: str = "claude-opus-4-8"
     ci_arch_review: bool = True
+    verify_fix: bool = True
+    testplan_enforce: bool = True
 
 
 @dataclass
@@ -153,6 +155,10 @@ class TestPlanResult:
     items: list[PlanCheckItem]
     raw_response: str
     all_passed: bool
+    # Non-empty when the verifier itself broke (bad exit, unparseable JSON)
+    # rather than criteria affirmatively failing. Callers treat this as a
+    # warning, not a gate — but all_passed is False so it can't pass silently.
+    check_error: str = ""
 
 
 @dataclass
@@ -192,6 +198,16 @@ class IdleTimeoutError(AgentError):
 class ImplementerBlockedError(AgentError):
     """Implementer reported STATUS: BLOCKED (or NEEDS_CONTEXT) and the
     in-attempt escalation retry also failed."""
+    pass
+
+
+class BudgetExhaustedError(Exception):
+    """Per-issue token budget spent before the pipeline finished.
+
+    Deliberately NOT an AgentError subclass: budget exhaustion is a policy
+    stop, not an agent failure, and must not be misclassified (or retried —
+    a retry with zero budget can only fail again).
+    """
     pass
 
 

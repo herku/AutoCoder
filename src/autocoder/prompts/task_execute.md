@@ -31,7 +31,9 @@ A single targeted test for THIS task's change is sufficient (do not run the full
 
 End your reply with EXACTLY one line of the form:
 
-    STATUS: <DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT>: <one-line detail>
+    STATUS: DONE: <one-line detail>
+
+where the token after `STATUS:` is exactly one of: DONE, DONE_WITH_CONCERNS, BLOCKED, NEEDS_CONTEXT (no angle brackets, no other decoration).
 
 Use:
 - **DONE** — task done, checkbox flipped to `- [x]`, targeted verification passed.
@@ -41,4 +43,4 @@ Use:
 
 Issue body (for context):
 {body}
-{error_context_block}
+{acceptance_criteria_block}{commands_block}{discussion_block}{error_context_block}

@@ -24,6 +24,7 @@ class Phase(str, Enum):
     CI_FIX = "ci_fix"
     CI_FIX_ARCH = "ci_fix_arch"
     BUILD_FIX = "build_fix"
+    VERIFY_FIX = "verify_fix"
     TASK_PLAN = "task_plan"
     TASK_EXEC = "task_exec"
 

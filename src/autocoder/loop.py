@@ -11,11 +11,12 @@ from pathlib import Path
 
 from autocoder.agent import (
     build_prompt, build_plan_prompt, build_implement_prompt,
-    build_task_plan_prompt, build_task_execute_prompt,
+    build_task_plan_prompt, build_task_execute_prompt, format_commands_block,
+    format_discussion_block,
     build_update_claude_md_prompt, build_ci_learn_prompt, build_impl_learn_prompt,
     generate_implement_brief,
     invoke_agent, set_rate_limit_wait, set_timeouts,
-    TIMEOUT_PLAN, TIMEOUT_IMPLEMENT, TIMEOUT_BUILD_FIX,
+    TIMEOUT_PLAN, TIMEOUT_IMPLEMENT, TIMEOUT_BUILD_FIX, TIMEOUT_VERIFY_FIX,
     TIMEOUT_CLAUDE_MD, BUDGET_CLAUDE_MD, BUDGET_CI_LEARN, BUDGET_IMPL_LEARN,
 )
 from autocoder import task_slice
@@ -23,11 +24,12 @@ from autocoder.anticheat import audit_diff, protect_test_files, restore_test_fil
 from autocoder.budget import BudgetTracker
 from autocoder.git import GitOps
 from autocoder.epic import process_epic
-from autocoder.issues import analyze_and_prioritize, fetch_issues, fetch_issues_by_number, parse_sub_issues
+from autocoder.issues import analyze_and_prioritize, fetch_issue_comments, fetch_issues, fetch_issues_by_number, parse_sub_issues
 from autocoder.logger import RunLogger
 from autocoder.pr import comment_failure, create_pr, label_failed, mark_ready, merge_pr, wait_for_ci, wait_for_new_checks
 from autocoder.review import (
     build_build_fix_prompt, build_ci_fix_prompt, build_ci_fix_arch_prompt,
+    build_verify_fix_prompt,
     build_fix_prompt, merge_reviews, review_and_fix_multi, review_pr_diff,
     run_external_review,
 )
@@ -44,6 +46,7 @@ from autocoder.types import (
     AgentResult,
     AntiCheatViolation,
     AuthenticationError,
+    BudgetExhaustedError,
     IdleTimeoutError,
     ImplementerBlockedError,
     ImplementerStatus,
@@ -384,15 +387,125 @@ def _handle_implementer_status(
     return escalated
 
 
+def _require_issue_budget(budget: BudgetTracker, phase_name: str) -> None:
+    """Refuse to start a paid phase with an exhausted per-issue budget.
+
+    Without this, exhaustion surfaced as a $0.01 --max-budget-usd that made
+    the agent error out instantly — misclassified as AGENT_ERROR and retried
+    with the same zero budget.
+    """
+    if budget.issue_exhausted():
+        raise BudgetExhaustedError(
+            f"Per-issue token budget exhausted before {phase_name} "
+            f"(spent {budget.issue_tokens_used} of {budget.per_issue_token_budget} tokens)"
+        )
+
+
+def _attempt_in_place_fix(
+    verify_results: list, cfg: RunConfig, budget: BudgetTracker, telem: Telemetry,
+    sandbox: SandboxConfig, timings: StepTimings, tag: str, att: str,
+) -> list:
+    """Run a focused in-place fix for the first failed verification stage,
+    then re-verify.
+
+    build → build_fix prompt (short cap); lint/unit/integration → verify_fix
+    prompt (longer cap, disabled via --no-verify-fix). Historically only build
+    failures got an in-place fix — every other stage rolled back the entire
+    implementation and re-implemented from scratch.
+
+    Returns the post-fix verification results, or the original failing
+    results when the fix could not run or errored. Rollback/retry policy
+    stays with the caller.
+    """
+    if budget.issue_exhausted():
+        # Let the caller raise VerificationError; the next attempt's budget
+        # guard converts it into a clean BudgetExhaustedError stop.
+        print("  Skipping in-place fix: issue budget exhausted.")
+        return verify_results
+
+    failed = next(v for v in verify_results if not v.passed)
+    if failed.stage == "build":
+        print(f"  Build failed. Attempting fix...")
+        prompt = build_build_fix_prompt(
+            format_failure(failed), cfg.build_cmd or "", cfg.repo_path,
+        )
+        phase, timeout, label = Phase.BUILD_FIX, TIMEOUT_BUILD_FIX, "build_fix"
+    elif cfg.verify_fix and failed.stage in ("lint", "unit", "integration"):
+        stage_cmds = {
+            "lint": cfg.lint_cmd, "unit": cfg.test_cmd,
+            "integration": cfg.integration_cmd,
+        }
+        print(f"  {failed.stage} verification failed. Attempting in-place fix...")
+        prompt = build_verify_fix_prompt(
+            failed.stage, format_failure(failed),
+            stage_cmds.get(failed.stage) or "", cfg.repo_path,
+        )
+        phase, timeout, label = Phase.VERIFY_FIX, TIMEOUT_VERIFY_FIX, "verify_fix"
+    else:
+        return verify_results
+
+    with StepTimer(f"{label} {tag} {att}", timings):
+        max_budget = budget.remaining_for_issue_usd(cfg.model)
+        fix_result = invoke_agent(
+            prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox,
+            timeout=timeout,
+        )
+    budget.record(fix_result)
+    telem.record_phase(phase, fix_result)
+
+    if fix_result.is_error:
+        print(f"  {label} agent errored; keeping original failure.")
+        return verify_results
+
+    print(f"  Re-verifying after {label}...")
+    with StepTimer(f"re_verify {tag} {att}", timings):
+        new_results = run_verification(cfg)
+    telem.record_verify(new_results)
+    return new_results
+
+
+_IMPL_ATTEMPTS_KEPT = 3
+_IMPL_ATTEMPT_MAX = 2_000
+_PRIOR_FAILURE_MAX = 1_000
+
+
+def _format_impl_attempt(attempt: int, error: str) -> str:
+    """Format one failed implement attempt for cross-attempt context accumulation."""
+    return f"## Attempt {attempt} failed\n{error[:_IMPL_ATTEMPT_MAX]}\n---"
+
+
 def process_issue(
     issue, cfg: RunConfig, git: GitOps, budget: BudgetTracker, log: RunLogger,
     timings: StepTimings, telem: Telemetry,
 ) -> None:
-    error_context = ""
+    # Every failed attempt is appended here so later attempts see what was
+    # already tried — a single scalar context loses the history (and used to
+    # go stale when a later attempt failed without setting it). Seeded with
+    # dead-letter records from previous runs so a re-run doesn't repeat the
+    # same doomed approach.
+    attempt_failures: list[str] = []
+    try:
+        priors = list(log.prior_failures(issue.number))
+    except Exception:
+        priors = []
+    for prior in priors:
+        attempt_failures.append(
+            "## A previous AutoCoder run failed on this issue\n"
+            f"{prior[:_PRIOR_FAILURE_MAX]}\n---"
+        )
     agent_result = None
     verify_results = []
     build_failures = 0
     sandbox = build_sandbox(cfg)
+    commands_block = format_commands_block(
+        cfg.build_cmd, cfg.test_cmd, cfg.lint_cmd, cfg.integration_cmd,
+    )
+    try:
+        discussion_block = format_discussion_block(
+            fetch_issue_comments(cfg.repo_path, issue.number)
+        )
+    except Exception:
+        discussion_block = ""  # discussion is best-effort context, never fatal
     plan_sandbox = build_plan_sandbox(cfg) if cfg.plan_mode else None
     budget.reset_issue()
     tag = f"#{issue.number}"
@@ -402,6 +515,7 @@ def process_issue(
         agent_result = None
         verify_results = []
         protected_files: list[str] = []
+        error_context = ""  # this attempt's failure detail; reset so it can't go stale
         att = f"att{attempt}"
 
         checkpoint = git.save_checkpoint()
@@ -409,6 +523,8 @@ def process_issue(
             branch = git.create_branch(issue.number, issue.title)
 
         try:
+            _require_issue_budget(budget, f"attempt {attempt}")
+
             # Protect test files if enabled
             if cfg.protect_tests:
                 protected_files = protect_test_files(cfg.repo_path, cfg.test_patterns)
@@ -430,8 +546,12 @@ def process_issue(
                     )
                 budget.record(brief_result)
                 telem.record_phase(Phase.IMPLEMENT_BRIEF, brief_result)
+                brief_out = (brief_result.result_text or "").strip()
                 if brief_result.is_error:
                     print(f"  Brief generation failed, continuing without brief: {brief_result.result_text[:100]}")
+                elif brief_out.startswith("BRIEF_FAILED") or not brief_out:
+                    # A wrong or empty brief is worse than none — don't prepend it.
+                    print(f"  Brief unusable, continuing without brief: {brief_out[:100] or '(empty)'}")
                 else:
                     brief_text = brief_result.result_text
 
@@ -442,6 +562,8 @@ def process_issue(
                 with StepTimer(f"task_slice {tag} {att}", timings):
                     ok, ts_err, ts_result = _run_task_slice(
                         issue, cfg, git, budget, telem, brief_text, sandbox,
+                        commands_block=commands_block,
+                        discussion_block=discussion_block,
                     )
                 if ok:
                     agent_result = ts_result
@@ -458,10 +580,12 @@ def process_issue(
                     )
 
             if not use_task_slice:
-                # Monolithic implement path.
-                mono_err_ctx = error_context
-                if task_slice_fallback_ctx and not mono_err_ctx:
-                    mono_err_ctx = task_slice_fallback_ctx
+                # Monolithic implement path. Feed the accumulated history of
+                # prior failed attempts (bounded) so the agent knows what has
+                # already been tried, mirroring the CI-fix loop.
+                mono_err_ctx = "\n\n".join(attempt_failures[-_IMPL_ATTEMPTS_KEPT:])
+                if task_slice_fallback_ctx:
+                    mono_err_ctx = f"{mono_err_ctx}\n\n{task_slice_fallback_ctx}".strip()
 
                 if cfg.plan_mode and plan_sandbox:
                     # Phase 1: Plan (read-only)
@@ -481,6 +605,8 @@ def process_issue(
                     # Phase 2: Implement with plan context (+ brief if present)
                     prompt = build_implement_prompt(
                         issue, plan_text, mono_err_ctx, cfg.repo_path, brief=brief_text,
+                        commands_block=commands_block,
+                        discussion_block=discussion_block,
                     )
                 else:
                     prompt = build_prompt(
@@ -488,6 +614,8 @@ def process_issue(
                         error_context=mono_err_ctx,
                         repo_path=cfg.repo_path,
                         brief=brief_text,
+                        commands_block=commands_block,
+                        discussion_block=discussion_block,
                     )
 
                 with StepTimer(f"agent {tag} {att}", timings):
@@ -543,31 +671,13 @@ def process_issue(
             telem.record_verify(verify_results)
 
             if not all(v.passed for v in verify_results):
-                failed = next(v for v in verify_results if not v.passed)
-                if failed.stage == "build":
-                    # Stage 4a: Attempt focused build fix before giving up
-                    print(f"  Build failed. Attempting fix...")
-                    with StepTimer(f"build_fix {tag} {att}", timings):
-                        fix_prompt = build_build_fix_prompt(format_failure(failed), cfg.build_cmd or "", cfg.repo_path)
-                        max_budget = budget.remaining_for_issue_usd(cfg.model)
-                        fix_result = invoke_agent(
-                            fix_prompt, cfg.repo_path, cfg.model, cfg.effort, max_budget, sandbox,
-                            timeout=TIMEOUT_BUILD_FIX,
-                        )
-                    budget.record(fix_result)
-                    telem.record_phase(Phase.BUILD_FIX, fix_result)
-
-                    if not fix_result.is_error:
-                        print(f"  Re-verifying after build fix...")
-                        with StepTimer(f"re_verify {tag} {att}", timings):
-                            verify_results = run_verification(cfg)
-                        telem.record_verify(verify_results)
-
-                    if fix_result.is_error or not all(v.passed for v in verify_results):
-                        failed = next((v for v in verify_results if not v.passed), failed)
-                        error_context = format_failure(failed)
-                        raise VerificationError(failed.stage, error_context)
-                else:
+                # Stage 4a: focused in-place fix (build_fix or verify_fix)
+                # before discarding the whole implementation.
+                verify_results = _attempt_in_place_fix(
+                    verify_results, cfg, budget, telem, sandbox, timings, tag, att,
+                )
+                if not all(v.passed for v in verify_results):
+                    failed = next(v for v in verify_results if not v.passed)
                     error_context = format_failure(failed)
                     raise VerificationError(failed.stage, error_context)
 
@@ -581,12 +691,19 @@ def process_issue(
 
                 telem.record_testplan(test_plan)
 
-                if not test_plan.all_passed:
+                if test_plan.check_error and not test_plan.items:
+                    # Verifier infrastructure failure — warn, never gate on it.
+                    print(
+                        f"  Warning: test plan verifier failed ({test_plan.check_error}); "
+                        "proceeding without criteria gate."
+                    )
+                elif not test_plan.all_passed:
                     failed_items = [i for i in test_plan.items if i.status == "fail"]
                     print(f"  Test plan: {len(failed_items)} criteria not met. Fixing...")
                     for item in failed_items:
                         print(f"    - {item.criterion[:80]}")
 
+                    _require_issue_budget(budget, "test plan fix")
                     with StepTimer(f"test_plan_fix {tag}", timings):
                         fix_prompt = build_test_plan_fix_prompt(issue, failed_items, cfg.repo_path)
                         max_budget = budget.remaining_for_issue_usd(cfg.model)
@@ -607,6 +724,22 @@ def process_issue(
                             raise VerificationError(failed.stage, error_context)
                         test_plan = verify_test_plan(issue, git.diff_full(), cfg.repo_path, cfg.model)
                         telem.record_testplan(test_plan)
+
+                    # Gate on the post-fix result: only affirmative "fail"
+                    # verdicts gate (a broken re-check has no items and is
+                    # warn-only above), so a flaky verifier can't sink a PR.
+                    still_failed = [i for i in test_plan.items if i.status == "fail"]
+                    if still_failed:
+                        summary = "; ".join(i.criterion[:100] for i in still_failed[:5])
+                        if cfg.testplan_enforce:
+                            error_context = (
+                                f"Acceptance criteria still unmet after fix attempt: {summary}"
+                            )
+                            raise VerificationError("testplan", error_context)
+                        print(
+                            f"  Warning: {len(still_failed)} acceptance criteria still "
+                            "unmet (enforcement disabled); proceeding."
+                        )
                 else:
                     print(f"  Test plan: all criteria met.")
 
@@ -699,6 +832,30 @@ def process_issue(
             git.checkout_main()
             raise  # Propagate to run() to stop all processing
 
+        except BudgetExhaustedError as e:
+            # Policy stop, not an agent failure — never retried: another
+            # attempt would start with the same zero budget.
+            telem.record_failure(FailureCategory.BUDGET_EXHAUSTED)
+            if protected_files:
+                restore_test_files(protected_files)
+            git.rollback(checkpoint)
+            git.checkout_main()
+            issue_telem = telem.end_issue(outcome=Outcome.SKIP.value)
+            log.log_attempt(
+                issue, attempt, agent_result, verify_results,
+                Outcome.SKIP, error=str(e), telemetry=issue_telem,
+            )
+            log.dead_letter(
+                issue, f"Budget exhausted: {e}", telemetry=issue_telem,
+                attempts=attempt,
+                status_detail=agent_result.status_detail if agent_result else None,
+            )
+            label_failed(cfg.repo_path, issue.number)
+            comment_failure(cfg.repo_path, issue.number, str(e))
+            git.delete_branch(branch)
+            print(f"  {e}. Dead-lettered (no retry).\n")
+            return
+
         except (AgentError, VerificationError, AntiCheatViolation, RuntimeError) as e:
             # Classify failure for telemetry
             if isinstance(e, VerificationError):
@@ -707,6 +864,7 @@ def process_issue(
                     "lint": FailureCategory.LINT_FAIL,
                     "unit": FailureCategory.TEST_FAIL,
                     "integration": FailureCategory.INTEGRATION_FAIL,
+                    "testplan": FailureCategory.TESTPLAN_FAIL,
                 }
                 telem.record_failure(_stage_map.get(e.stage, FailureCategory.TEST_FAIL))
 
@@ -723,7 +881,11 @@ def process_issue(
                             issue, attempt, agent_result, verify_results,
                             Outcome.SKIP, error=str(e), telemetry=issue_telem,
                         )
-                        log.dead_letter(issue, f"Build failed after {cfg.build_retries} retries: {e}")
+                        log.dead_letter(
+                            issue, f"Build failed after {cfg.build_retries} retries: {e}",
+                            telemetry=issue_telem, attempts=attempt,
+                            status_detail=agent_result.status_detail if agent_result else None,
+                        )
                         label_failed(cfg.repo_path, issue.number)
                         comment_failure(cfg.repo_path, issue.number, str(e))
                         git.delete_branch(branch)
@@ -751,14 +913,17 @@ def process_issue(
                     Outcome.RETRY, error=str(e), telemetry=issue_telem,
                 )
                 print(f"  Attempt {attempt} failed: {str(e)[:200]}")
-                if not error_context:
-                    if isinstance(e, IdleTimeoutError):
-                        error_context = (
-                            f"Previous attempt hung silently ({str(e)}). "
-                            "Make visible progress early — prefer small incremental edits and avoid long silent thinking."
-                        )
-                    else:
-                        error_context = str(e)
+                # Record THIS attempt's failure unconditionally. error_context
+                # (set in the try block before raising) carries the full
+                # verify/critique output; str(e) is a truncated fallback.
+                if isinstance(e, IdleTimeoutError):
+                    failure_text = (
+                        f"Attempt hung silently ({str(e)}). "
+                        "Make visible progress early — prefer small incremental edits and avoid long silent thinking."
+                    )
+                else:
+                    failure_text = error_context or str(e)
+                attempt_failures.append(_format_impl_attempt(attempt, failure_text))
             else:
                 # Final failure
                 issue_telem = telem.end_issue(outcome=Outcome.SKIP.value)
@@ -766,7 +931,10 @@ def process_issue(
                     issue, attempt, agent_result, verify_results,
                     Outcome.SKIP, error=str(e), telemetry=issue_telem,
                 )
-                log.dead_letter(issue, str(e))
+                log.dead_letter(
+                    issue, str(e), telemetry=issue_telem, attempts=attempt,
+                    status_detail=agent_result.status_detail if agent_result else None,
+                )
                 label_failed(cfg.repo_path, issue.number)
                 comment_failure(cfg.repo_path, issue.number, str(e))
                 git.delete_branch(branch)
@@ -780,7 +948,11 @@ def process_issue(
                 restore_test_files(protected_files)
             git.rollback(checkpoint)
             git.checkout_main()
-            error_context = "Previous attempt timed out. Use a simpler approach."
+            attempt_failures.append(_format_impl_attempt(
+                attempt,
+                "Attempt exceeded the wall-clock timeout before finishing. "
+                "Use a simpler, more incremental approach.",
+            ))
             log.log_attempt(
                 issue, attempt, agent_result, verify_results,
                 Outcome.RETRY, error="timeout", telemetry=issue_telem,
@@ -871,7 +1043,8 @@ def _process_issues_parallel(
 
 def _run_task_slice(
     issue, cfg: RunConfig, git: GitOps, budget: BudgetTracker, telem: Telemetry,
-    brief_text: str, sandbox: SandboxConfig,
+    brief_text: str, sandbox: SandboxConfig, commands_block: str = "",
+    discussion_block: str = "",
 ) -> tuple[bool, str, AgentResult | None]:
     """Run the task-sliced implement flow.
 
@@ -953,6 +1126,8 @@ def _run_task_slice(
             exec_prompt = build_task_execute_prompt(
                 issue, str(plan_p), current.text,
                 error_context=task_err, repo_path=cfg.repo_path,
+                commands_block=commands_block,
+                discussion_block=discussion_block,
             )
             max_budget = budget.remaining_for_issue_usd(cfg.model)
             t_result = invoke_agent(

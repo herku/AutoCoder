@@ -23,7 +23,7 @@ Issue **exactly 5 `Task` tool calls in a single assistant turn**. Do NOT use `ru
 Each sub-agent gets:
 - `subagent_type: "general-purpose"`
 - `description`: the role name (e.g. "Quality review")
-- `prompt`: the role brief below, suffixed with the diff and any external findings, plus `"Return a compact list of findings, each with file:line, description, severity (critical/medium/low), and why it matters. If nothing found, say 'NONE'."`
+- `prompt`: the role brief below, plus `"Run 'git diff main' yourself to see the full change and Read any file you need for context. Return a compact list of findings, each with file:line, description, severity (critical or medium ONLY — do not report low-severity nits, they will be discarded), and why it matters. If nothing found, say 'NONE'."` Append a one-line summary of any external-reviewer findings relevant to that role. Do NOT paste the full diff into sub-agent prompts — they gather it themselves.
 
 Role briefs to spawn:
 

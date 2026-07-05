@@ -46,6 +46,51 @@ def test_build_prompt_with_error_context():
     assert "DIFFERENT approach" in prompt
 
 
+def test_format_commands_block_lists_configured_commands():
+    from autocoder.agent import format_commands_block
+
+    block = format_commands_block("npm run build", "npm test", "npm run lint")
+    assert "`npm run lint`" in block
+    assert "`npm test`" in block
+    assert "`npm run build`" in block
+    assert "Project commands" in block
+
+
+def test_format_commands_block_empty_when_nothing_configured():
+    from autocoder.agent import format_commands_block
+
+    assert format_commands_block(None, None, None, None) == ""
+
+
+def test_build_prompt_includes_commands_block():
+    prompt = build_prompt(_make_issue(), commands_block="\n## Project commands\n- Tests: `uv run pytest`\n")
+    assert "uv run pytest" in prompt
+
+
+def test_build_prompt_includes_criteria_past_body_truncation():
+    # Criteria sit past the 4000-char body cap; the implementer must still see them.
+    body = ("x" * 4500) + "\n\n- [ ] hidden criterion alpha\n- [ ] hidden criterion beta\n"
+    prompt = build_prompt(_make_issue(body=body))
+    assert "Acceptance criteria (complete list)" in prompt
+    assert "hidden criterion alpha" in prompt
+    assert "hidden criterion beta" in prompt
+
+
+def test_build_prompt_no_criteria_block_without_checkboxes():
+    prompt = build_prompt(_make_issue())
+    assert "Acceptance criteria (complete list)" not in prompt
+
+
+def test_build_implement_prompt_includes_criteria_and_commands():
+    body = "Fix it.\n- [ ] returns 200\n- [ ] logs the request"
+    prompt = build_implement_prompt(
+        _make_issue(body=body), "1. do the thing",
+        commands_block="\n## Project commands\n- Build: `make build`\n",
+    )
+    assert "returns 200" in prompt
+    assert "make build" in prompt
+
+
 def test_parse_agent_output_json():
     data = {
         "session_id": "sess-123",
@@ -159,7 +204,8 @@ def test_build_brief_prompt_has_placeholders_filled():
 
 def test_build_prompt_with_brief_appends_block():
     prompt = build_prompt(_make_issue(), brief="- Touch foo.py\n- Add test for empty input")
-    assert "Design brief from advisory agents:" in prompt
+    assert "Design brief from advisory agents" in prompt
+    assert "do NOT implement anything marked OUT" in prompt
     assert "Touch foo.py" in prompt
     assert "Add test for empty input" in prompt
 
@@ -174,7 +220,8 @@ def test_build_implement_prompt_with_brief():
         _make_issue(), plan_text="plan goes here", brief="- Brief item one",
     )
     assert "plan goes here" in prompt
-    assert "Design brief from advisory agents:" in prompt
+    assert "Design brief from advisory agents" in prompt
+    assert "do NOT implement anything marked OUT" in prompt
     assert "Brief item one" in prompt
 
 
@@ -247,6 +294,19 @@ def test_parse_status_case_insensitive_token():
     assert status is ImplementerStatus.DONE
 
 
+def test_parse_status_tolerates_angle_brackets():
+    # A literal-minded model may copy the template's <TOKEN> form verbatim.
+    status, detail = parse_status("STATUS: <DONE>: all tests pass")
+    assert status is ImplementerStatus.DONE
+    assert detail == "all tests pass"
+
+
+def test_parse_status_angle_bracket_compound_token():
+    # <DONE_WITH_CONCERNS> must not be misread as DONE.
+    status, _ = parse_status("STATUS: <DONE_WITH_CONCERNS>: flaky test")
+    assert status is ImplementerStatus.DONE_WITH_CONCERNS
+
+
 def test_parse_agent_output_propagates_status():
     data = {
         "session_id": "sess-7",
@@ -276,3 +336,21 @@ def test_generate_implement_brief_calls_invoke_agent():
     # The prompt arg should include the issue title
     call_prompt = mock_invoke.call_args[0][0]
     assert "Fix widget crash" in call_prompt
+
+
+def test_format_discussion_block_keeps_latest_comments():
+    from autocoder.agent import format_discussion_block, DISCUSSION_MAX_COMMENTS
+
+    comments = [f"user: comment {i}" for i in range(20)]
+    block = format_discussion_block(comments)
+    assert "comment 19" in block
+    assert "comment 5" not in block  # older than the last 10
+    assert format_discussion_block([]) == ""
+
+
+def test_build_prompt_includes_discussion_block():
+    prompt = build_prompt(
+        _make_issue(),
+        discussion_block="\n## Issue discussion\n- alice: use v2 endpoint\n",
+    )
+    assert "use v2 endpoint" in prompt

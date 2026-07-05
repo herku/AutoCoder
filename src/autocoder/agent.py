@@ -18,7 +18,7 @@ from autocoder.types import (
 PROMPT_BODY_MAX = 4000
 
 _STATUS_RE = re.compile(
-    r"^[\s>*\-]*STATUS:\s*(DONE_WITH_CONCERNS|NEEDS_CONTEXT|BLOCKED|DONE)\b[\s:\-]*(.*)$",
+    r"^[\s>*\-]*STATUS:\s*<?\s*(DONE_WITH_CONCERNS|NEEDS_CONTEXT|BLOCKED|DONE)\b[\s:>\-]*(.*)$",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -86,10 +86,91 @@ def _error_block(ctx: str, message: str = "The previous attempt to fix this issu
 def _brief_block(brief: str) -> str:
     if not brief:
         return ""
-    return f"\n\nDesign brief from advisory agents:\n{brief}\n"
+    return (
+        "\n\nDesign brief from advisory agents (stay inside its Scope decisions"
+        " — do NOT implement anything marked OUT):\n"
+        f"{brief}\n"
+    )
 
 
-def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", triage_model: str = "", plan_mode: bool = False, brief: str = "") -> str:
+def format_commands_block(
+    build_cmd: str | None,
+    test_cmd: str | None,
+    lint_cmd: str | None,
+    integration_cmd: str | None = None,
+) -> str:
+    """Render the project's configured verification commands for the implementer.
+
+    The templates tell the agent to run "the project's lint/test/build command";
+    without this block it has to re-derive commands the orchestrator already
+    knows. Returns "" when nothing is configured.
+    """
+    lines = [
+        f"- {label}: `{cmd}`"
+        for label, cmd in (
+            ("Lint", lint_cmd),
+            ("Tests", test_cmd),
+            ("Integration tests", integration_cmd),
+            ("Build", build_cmd),
+        )
+        if cmd
+    ]
+    if not lines:
+        return ""
+    return (
+        "\n## Project commands (use these exact commands to verify)\n"
+        + "\n".join(lines)
+        + "\n"
+    )
+
+
+DISCUSSION_MAX_COMMENTS = 10
+DISCUSSION_COMMENT_MAX = 500
+DISCUSSION_BLOCK_MAX = 3000
+
+
+def format_discussion_block(comments: list[str]) -> str:
+    """Render issue comments for the implementer (latest comments kept —
+    the tail of a discussion is where clarifications and final decisions
+    live). Returns "" when there are none."""
+    if not comments:
+        return ""
+    kept = comments[-DISCUSSION_MAX_COMMENTS:]
+    lines = [f"- {c[:DISCUSSION_COMMENT_MAX]}" for c in kept]
+    block = (
+        "\n## Issue discussion (may contain clarifications that supersede the body)\n"
+        + "\n".join(lines)
+        + "\n"
+    )
+    return block[:DISCUSSION_BLOCK_MAX]
+
+
+CRITERIA_BLOCK_MAX = 6000
+
+
+def _criteria_block(issue_body: str) -> str:
+    """Render the FULL acceptance-criteria list from the untruncated issue body.
+
+    The body shown in the prompt is capped at PROMPT_BODY_MAX, but verification
+    checks criteria from the full body — so criteria past the truncation point
+    must still reach the implementer.
+    """
+    from autocoder.testplan import extract_acceptance_criteria
+
+    criteria = extract_acceptance_criteria(issue_body)
+    if not criteria:
+        return ""
+    listing = "\n".join(f"{i + 1}. {c}" for i, c in enumerate(criteria))
+    block = (
+        "\n## Acceptance criteria (complete list)\n"
+        "Verification will check EVERY item below against your change. The issue\n"
+        "body above may be truncated — this list is authoritative.\n"
+        f"{listing}\n"
+    )
+    return block[:CRITERIA_BLOCK_MAX]
+
+
+def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", triage_model: str = "", plan_mode: bool = False, brief: str = "", commands_block: str = "", discussion_block: str = "") -> str:
     body = truncate_body(issue.body, PROMPT_BODY_MAX)
     verb = action_verb(issue)
     base = load("implement", repo_path or None).format(
@@ -97,6 +178,9 @@ def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", tri
         issue_number=issue.number,
         issue_title=issue.title,
         body=body,
+        acceptance_criteria_block=_criteria_block(issue.body),
+        commands_block=commands_block,
+        discussion_block=discussion_block,
         error_context_block=_error_block(error_context),
     )
     return base + _brief_block(brief)
@@ -112,7 +196,7 @@ def build_plan_prompt(issue: Issue, repo_path: str = "") -> str:
     )
 
 
-def build_implement_prompt(issue: Issue, plan_text: str, error_context: str = "", repo_path: str = "", brief: str = "") -> str:
+def build_implement_prompt(issue: Issue, plan_text: str, error_context: str = "", repo_path: str = "", brief: str = "", commands_block: str = "", discussion_block: str = "") -> str:
     """Build a prompt for the implementation phase, with plan as context."""
     body = truncate_body(issue.body, PROMPT_BODY_MAX)
     verb = action_verb(issue)
@@ -121,6 +205,9 @@ def build_implement_prompt(issue: Issue, plan_text: str, error_context: str = ""
         issue_number=issue.number,
         issue_title=issue.title,
         body=body,
+        acceptance_criteria_block=_criteria_block(issue.body),
+        commands_block=commands_block,
+        discussion_block=discussion_block,
         plan_text=plan_text,
         error_context_block=_error_block(error_context, "The previous attempt failed with these errors."),
     )
@@ -143,7 +230,8 @@ def build_task_plan_prompt(
 
 def build_task_execute_prompt(
     issue: Issue, plan_path: str, task_text: str,
-    error_context: str = "", repo_path: str = "",
+    error_context: str = "", repo_path: str = "", commands_block: str = "",
+    discussion_block: str = "",
 ) -> str:
     """Build the prompt for a single-task fresh-session executor."""
     body = truncate_body(issue.body, PROMPT_BODY_MAX)
@@ -153,6 +241,9 @@ def build_task_execute_prompt(
         issue_number=issue.number,
         issue_title=issue.title,
         body=body,
+        acceptance_criteria_block=_criteria_block(issue.body),
+        commands_block=commands_block,
+        discussion_block=discussion_block,
         plan_path=plan_path,
         task_text=task_text,
         error_context_block=_error_block(error_context),
@@ -183,6 +274,7 @@ def build_impl_learn_prompt(diff_stats: str, verify_summary: str, repo_path: str
 TIMEOUT_PLAN = 3600  # 60 minutes for plan phase (read-only analysis)
 TIMEOUT_IMPLEMENT = 6000  # 100 minutes for implementation phase
 TIMEOUT_BUILD_FIX = 300  # 5 minutes for build fix attempt
+TIMEOUT_VERIFY_FIX = 600  # 10 minutes for lint/test fix attempt (suites run slower than builds)
 TIMEOUT_CLAUDE_MD = 600  # 10 minutes for CLAUDE.md update
 TIMEOUT_BRIEF = 600  # 10 minutes for pre-implement brief (3 parallel advisors)
 BUDGET_CLAUDE_MD = 2.00  # $2.00 max for doc update

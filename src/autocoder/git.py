@@ -4,9 +4,20 @@ import atexit
 import os
 import re
 import subprocess
+import threading
 from pathlib import Path
 
 from autocoder.types import LockError
+
+# `git worktree add/remove/prune` all mutate the shared .git worktree
+# registry; concurrent workers under --parallel must serialize those calls.
+_WORKTREE_REGISTRY_LOCK = threading.Lock()
+
+# Branches AutoCoder itself creates: feat/<issue-num>[-slug], the legacy ai/
+# prefix, and per-run worktree branches. Cleanup must never sweep broader
+# than this — plain feat/* would destroy human branches on a very common
+# naming convention.
+_AUTOCODER_BRANCH_RE = re.compile(r"^(feat/\d+(-|$)|ai/|autocoder-wt-)")
 
 _PLAN_ONLY_PATTERN = re.compile(
     r"^(PLAN[-_].*\.md|plan[-_].*\.md|TODO[-_].*\.md|IMPLEMENTATION[-_].*\.md)$",
@@ -180,10 +191,14 @@ class GitOps:
         return result.stdout.strip()
 
     def cleanup_orphan_branches(self) -> None:
-        for prefix in ("feat/*", "ai/*"):
-            result = self._run("branch", "--list", "--no-color", prefix)
-            branches = [b.strip().lstrip("* ") for b in result.stdout.strip().split("\n") if b.strip()]
-            for branch in branches:
+        """Delete leftover branches from crashed AutoCoder runs.
+
+        Only branches matching AutoCoder's own naming shapes are removed
+        (see _AUTOCODER_BRANCH_RE) — never a blanket feat/* sweep.
+        """
+        result = self._run("branch", "--list", "--format=%(refname:short)")
+        for branch in (b.strip() for b in result.stdout.splitlines()):
+            if branch and _AUTOCODER_BRANCH_RE.match(branch):
                 self._run("branch", "-D", branch, check=False)
 
     def create_worktree(self, path: str, branch: str, base: str | None = None) -> None:
@@ -192,14 +207,17 @@ class GitOps:
         Caller is responsible for `remove_worktree` on completion.
         """
         target = base or self.get_main_branch()
-        # Force: drop any pre-existing branch with the same name
-        self._run("branch", "-D", branch, check=False)
-        self._run("worktree", "add", "-b", branch, path, target)
+        with _WORKTREE_REGISTRY_LOCK:
+            # Force: drop any pre-existing branch with the same name
+            self._run("branch", "-D", branch, check=False)
+            self._run("worktree", "add", "-b", branch, path, target)
 
     def remove_worktree(self, path: str) -> None:
         """Force-remove a worktree at `path`. Safe to call multiple times."""
-        self._run("worktree", "remove", "--force", path, check=False)
+        with _WORKTREE_REGISTRY_LOCK:
+            self._run("worktree", "remove", "--force", path, check=False)
 
     def prune_worktrees(self) -> None:
         """Clean up worktree administrative records for removed directories."""
-        self._run("worktree", "prune", check=False)
+        with _WORKTREE_REGISTRY_LOCK:
+            self._run("worktree", "prune", check=False)

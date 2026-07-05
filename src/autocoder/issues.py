@@ -39,6 +39,39 @@ def fetch_issues_by_number(repo_path: str, numbers: list[int]) -> list[Issue]:
     return issues
 
 
+def fetch_issue_comments(repo_path: str, number: int) -> list[str]:
+    """Fetch an issue's comments as "author: body" strings.
+
+    The discussion often carries clarifications and de-facto spec changes
+    that never make it back into the issue body. Failures are non-fatal —
+    returns [] so the pipeline proceeds with body-only context.
+    """
+    result = subprocess.run(
+        ["gh", "issue", "view", str(number), "--json", "comments"],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return []
+    comments = data.get("comments") or []
+    out: list[str] = []
+    for c in comments:
+        if not isinstance(c, dict):
+            continue
+        body = (c.get("body") or "").strip()
+        if not body:
+            continue
+        author = (c.get("author") or {}).get("login", "unknown")
+        out.append(f"{author}: {body}")
+    return out
+
+
 def fetch_issues(repo_path: str, labels: list[str], limit: int = 0) -> list[Issue]:
     """Fetch open issues. If limit > 0, cap the result count."""
     all_issues: list[Issue] = []
