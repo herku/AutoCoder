@@ -2,7 +2,7 @@
 
 Issue body:
 {body}
-{acceptance_criteria_block}{commands_block}{discussion_block}
+{acceptance_criteria_block}{commands_block}{discussion_block}{images_block}
 Instructions:
 - Read relevant source files before making changes
 - Write or update tests that verify your fix

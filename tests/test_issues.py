@@ -419,3 +419,186 @@ def test_fetch_issue_comments_failures_return_empty():
         assert fetch_issue_comments("/tmp/x", 7) == []
     with patch("autocoder.issues.subprocess.run", return_value=MagicMock(returncode=0, stdout="not json")):
         assert fetch_issue_comments("/tmp/x", 7) == []
+
+
+# --- Issue image extraction/download ---
+
+def test_extract_image_urls_markdown():
+    from autocoder.issues import extract_image_urls
+
+    text = "See ![shot](https://github.com/user-attachments/assets/abc-123)"
+    assert extract_image_urls(text) == [
+        "https://github.com/user-attachments/assets/abc-123"
+    ]
+
+
+def test_extract_image_urls_html_img():
+    from autocoder.issues import extract_image_urls
+
+    text = (
+        '<img src="https://user-images.githubusercontent.com/1/a.png" width=200>\n'
+        "<img src='https://camo.githubusercontent.com/b'>\n"
+        "<IMG src=https://private-user-images.githubusercontent.com/2/c.jpg>"
+    )
+    assert extract_image_urls(text) == [
+        "https://user-images.githubusercontent.com/1/a.png",
+        "https://camo.githubusercontent.com/b",
+        "https://private-user-images.githubusercontent.com/2/c.jpg",
+    ]
+
+
+def test_extract_image_urls_bare_attachment_url():
+    from autocoder.issues import extract_image_urls
+
+    text = "Screenshot: https://github.com/user-attachments/assets/deadbeef-1234"
+    assert extract_image_urls(text) == [
+        "https://github.com/user-attachments/assets/deadbeef-1234"
+    ]
+
+
+def test_extract_image_urls_dedup_and_order():
+    from autocoder.issues import extract_image_urls
+
+    a = "https://github.com/user-attachments/assets/aaa"
+    b = "https://user-images.githubusercontent.com/9/b.png"
+    text = f'<img src="{b}">\n![x]({a})\nagain: {a}'
+    assert extract_image_urls(text) == [b, a]
+
+
+def test_extract_image_urls_cap_at_five():
+    from autocoder.issues import extract_image_urls
+
+    text = "\n".join(
+        f"![i](https://github.com/user-attachments/assets/img-{i})" for i in range(8)
+    )
+    assert len(extract_image_urls(text)) == 5
+
+
+def test_extract_image_urls_skips_non_github_hosts():
+    from autocoder.issues import extract_image_urls
+
+    text = (
+        "![evil](https://evil.example/x.png)\n"
+        "![ok](https://github.com/user-attachments/assets/ok)\n"
+        "![http](http://github.com/user-attachments/assets/plaintext)"
+    )
+    assert extract_image_urls(text) == [
+        "https://github.com/user-attachments/assets/ok"
+    ]
+
+
+def test_ext_for_content_type():
+    from autocoder.issues import _ext_for_content_type
+
+    assert _ext_for_content_type("image/png") == ".png"
+    assert _ext_for_content_type("image/jpeg") == ".jpg"
+    assert _ext_for_content_type("image/gif") == ".gif"
+    assert _ext_for_content_type("image/webp") == ".webp"
+    assert _ext_for_content_type("image/svg+xml") == ".svg"
+    assert _ext_for_content_type("IMAGE/PNG; charset=binary") == ".png"
+    assert _ext_for_content_type("text/html") is None
+    assert _ext_for_content_type("") is None
+
+
+def _fake_run_factory(curl_results):
+    """subprocess.run side_effect: answers `gh auth token` and pops one
+    (returncode, content_type, payload) per curl call, writing payload to -o."""
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["gh", "auth", "token"]:
+            return MagicMock(returncode=0, stdout="tok-123\n")
+        assert cmd[0] == "curl"
+        returncode, content_type, payload = curl_results.pop(0)
+        out_path = cmd[cmd.index("-o") + 1]
+        with open(out_path, "wb") as f:
+            f.write(payload)
+        return MagicMock(returncode=returncode, stdout=content_type)
+    return fake_run
+
+
+def test_download_issue_images_success(tmp_path):
+    from autocoder.issues import download_issue_images
+
+    fake = _fake_run_factory([(0, "image/png", b"\x89PNG data")])
+    with patch("autocoder.issues.subprocess.run", side_effect=fake):
+        paths = download_issue_images(
+            str(tmp_path), 12,
+            ["![s](https://github.com/user-attachments/assets/abc)"],
+        )
+    assert paths == [".autocoder/images/issue-12/image-1.png"]
+    assert (tmp_path / paths[0]).read_bytes() == b"\x89PNG data"
+    assert (tmp_path / ".autocoder" / ".gitignore").read_text().strip() == "*"
+
+
+def test_download_issue_images_partial_failure(tmp_path):
+    from autocoder.issues import download_issue_images
+
+    fake = _fake_run_factory([
+        (22, "", b""),  # curl -f HTTP error
+        (0, "image/jpeg", b"jpeg data"),
+    ])
+    with patch("autocoder.issues.subprocess.run", side_effect=fake):
+        paths = download_issue_images(
+            str(tmp_path), 3,
+            [
+                "![a](https://github.com/user-attachments/assets/a)",
+                "![b](https://github.com/user-attachments/assets/b)",
+            ],
+        )
+    assert paths == [".autocoder/images/issue-3/image-2.jpg"]
+
+
+def test_download_issue_images_non_image_skipped(tmp_path):
+    from autocoder.issues import download_issue_images
+
+    fake = _fake_run_factory([(0, "text/html", b"<html>error</html>")])
+    with patch("autocoder.issues.subprocess.run", side_effect=fake):
+        paths = download_issue_images(
+            str(tmp_path), 5,
+            ["![x](https://github.com/user-attachments/assets/x)"],
+        )
+    assert paths == []
+    assert list((tmp_path / ".autocoder" / "images" / "issue-5").iterdir()) == []
+
+
+def test_download_issue_images_no_urls_no_subprocess(tmp_path):
+    from autocoder.issues import download_issue_images
+
+    with patch("autocoder.issues.subprocess.run") as mock_run:
+        assert download_issue_images(str(tmp_path), 1, ["no images here"]) == []
+    mock_run.assert_not_called()
+
+
+def test_download_issue_images_token_failure_still_tries(tmp_path):
+    from autocoder.issues import download_issue_images
+
+    curl_cmds = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["gh", "auth", "token"]:
+            return MagicMock(returncode=1, stdout="")
+        curl_cmds.append(cmd)
+        out_path = cmd[cmd.index("-o") + 1]
+        with open(out_path, "wb") as f:
+            f.write(b"png")
+        return MagicMock(returncode=0, stdout="image/png")
+
+    with patch("autocoder.issues.subprocess.run", side_effect=fake_run):
+        paths = download_issue_images(
+            str(tmp_path), 8,
+            ["![s](https://github.com/user-attachments/assets/s)"],
+        )
+    assert paths == [".autocoder/images/issue-8/image-1.png"]
+    assert "-H" not in curl_cmds[0]  # no Authorization header without a token
+
+
+def test_download_issue_images_oversize_deleted(tmp_path):
+    from autocoder.issues import IMAGE_MAX_BYTES, download_issue_images
+
+    fake = _fake_run_factory([(0, "image/png", b"x" * (IMAGE_MAX_BYTES + 1))])
+    with patch("autocoder.issues.subprocess.run", side_effect=fake):
+        paths = download_issue_images(
+            str(tmp_path), 9,
+            ["![big](https://github.com/user-attachments/assets/big)"],
+        )
+    assert paths == []
+    assert list((tmp_path / ".autocoder" / "images" / "issue-9").iterdir()) == []

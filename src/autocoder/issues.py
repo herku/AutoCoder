@@ -4,10 +4,12 @@ import hashlib
 import heapq
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+from autocoder.git import ensure_autocoder_ignored
 from autocoder.prompts import load
 from autocoder.types import Issue, Priority
 
@@ -70,6 +72,147 @@ def fetch_issue_comments(repo_path: str, number: int) -> list[str]:
         author = (c.get("author") or {}).get("login", "unknown")
         out.append(f"{author}: {body}")
     return out
+
+
+IMAGE_MAX_COUNT = 5
+IMAGE_MAX_BYTES = 5 * 1024 * 1024
+IMAGE_DOWNLOAD_TIMEOUT = 30  # seconds per file
+
+_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(\s*(https?://[^\s)]+)")
+_HTML_IMG_RE = re.compile(r"<img[^>]+src\s*=\s*[\"']?([^\"'\s>]+)", re.IGNORECASE)
+_BARE_ATTACH_RE = re.compile(r"https?://github\.com/user-attachments/assets/[\w-]+")
+
+# Only these hosts ever receive the gh token; URLs anywhere else are skipped
+# entirely rather than fetched unauthenticated — issue bodies are untrusted
+# input and shouldn't drive requests to arbitrary hosts.
+_GITHUB_IMAGE_HOSTS = (
+    "https://github.com/user-attachments/",
+    "https://user-images.githubusercontent.com/",
+    "https://private-user-images.githubusercontent.com/",
+    "https://camo.githubusercontent.com/",
+)
+
+_CONTENT_TYPE_EXT = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/svg+xml": ".svg",
+}
+
+
+def extract_image_urls(text: str) -> list[str]:
+    """Extract GitHub-hosted image URLs from markdown/HTML issue text.
+
+    Document order, deduped, capped at IMAGE_MAX_COUNT."""
+    matches: list[tuple[int, str]] = []
+    for regex in (_MD_IMAGE_RE, _HTML_IMG_RE, _BARE_ATTACH_RE):
+        for m in regex.finditer(text):
+            matches.append((m.start(), m.group(1) if m.groups() else m.group(0)))
+    matches.sort(key=lambda t: t[0])
+    seen: set[str] = set()
+    urls: list[str] = []
+    for _, url in matches:
+        if url in seen or not url.startswith(_GITHUB_IMAGE_HOSTS):
+            continue
+        seen.add(url)
+        urls.append(url)
+        if len(urls) >= IMAGE_MAX_COUNT:
+            break
+    return urls
+
+
+def _gh_token(repo_path: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"],
+            cwd=repo_path, capture_output=True, text=True, check=False, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    token = result.stdout.strip()
+    return token if result.returncode == 0 and token else None
+
+
+def _ext_for_content_type(content_type: str) -> str | None:
+    return _CONTENT_TYPE_EXT.get(content_type.split(";")[0].strip().lower())
+
+
+def _download_image(url: str, dest_base: Path, token: str | None) -> Path | None:
+    """Download one image to dest_base, rename with the content-type extension.
+
+    Returns the final path, or None on any failure (never raises)."""
+    cmd = [
+        "curl", "-fsSL",
+        "--max-redirs", "5",
+        "--max-time", str(IMAGE_DOWNLOAD_TIMEOUT),
+        "--max-filesize", str(IMAGE_MAX_BYTES),
+        "-o", str(dest_base),
+        "-w", "%{content_type}",
+    ]
+    if token:
+        # Attachment URLs 302-redirect to signed S3 URLs that reject requests
+        # carrying an Authorization header on top of the signature. curl >=
+        # 7.58 strips custom Authorization headers on cross-host redirects,
+        # so the token only ever reaches the GitHub host.
+        cmd += ["-H", f"Authorization: token {token}"]
+    cmd.append(url)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=False,
+            timeout=IMAGE_DOWNLOAD_TIMEOUT + 10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    try:
+        if result.returncode != 0:
+            dest_base.unlink(missing_ok=True)
+            return None
+        ext = _ext_for_content_type(result.stdout.strip())
+        if ext is None:  # HTML error page or other non-image response
+            dest_base.unlink(missing_ok=True)
+            return None
+        # --max-filesize is ineffective on chunked responses; re-check.
+        size = dest_base.stat().st_size
+        if size == 0 or size > IMAGE_MAX_BYTES:
+            dest_base.unlink(missing_ok=True)
+            return None
+        dest = dest_base.with_suffix(ext)
+        dest_base.rename(dest)
+        return dest
+    except OSError:
+        return None
+
+
+def download_issue_images(repo_path: str, issue_number: int, texts: list[str]) -> list[str]:
+    """Download GitHub-hosted images referenced in issue body/comments into
+    {repo}/.autocoder/images/issue-<N>/.
+
+    Screenshots and mockups often constrain the implementation, but fetching
+    them needs GitHub auth the sandboxed agent doesn't have — so the
+    orchestrator downloads them and the prompt points the agent's Read tool
+    at the local files. Best-effort: every failure is swallowed. Returns
+    repo-RELATIVE paths (docker mode mounts the repo at /workspace, so
+    absolute host paths would dangle) of the files that downloaded OK.
+    """
+    urls = extract_image_urls("\n\n".join(texts))
+    if not urls:
+        return []
+    ensure_autocoder_ignored(repo_path)
+    rel_dir = Path(".autocoder") / "images" / f"issue-{issue_number}"
+    dest_dir = Path(repo_path) / rel_dir
+    shutil.rmtree(dest_dir, ignore_errors=True)  # idempotent across reruns
+    try:
+        dest_dir.mkdir(parents=True)
+    except OSError:
+        return []
+    token = _gh_token(repo_path)
+    paths: list[str] = []
+    for i, url in enumerate(urls, 1):
+        dest = _download_image(url, dest_dir / f"image-{i}", token)
+        if dest is not None:
+            paths.append(str(rel_dir / dest.name))
+    return paths
 
 
 def fetch_issues(repo_path: str, labels: list[str], limit: int = 0) -> list[Issue]:

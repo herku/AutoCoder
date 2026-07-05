@@ -43,4 +43,4 @@ Use:
 
 Issue body (for context):
 {body}
-{acceptance_criteria_block}{commands_block}{discussion_block}{error_context_block}
+{acceptance_criteria_block}{commands_block}{discussion_block}{images_block}{error_context_block}

@@ -26,7 +26,7 @@ review.py       Single-reviewer + multi-agent orchestrator; external-reviewer su
 testplan.py     Acceptance criteria verification against diff
 verify.py       Runs lint/unit/integration/build tests (stops on first failure)
 budget.py       Token & cost tracking (per-issue + daily cap); thread-local per-issue tokens, locked daily totals
-git.py          GitOps class: branching, commit, diff, rollback, merge, lockfile, worktree create/remove/prune (registry-lock serialized); orphan cleanup scoped to AutoCoder branch shapes only
+git.py          GitOps class: branching, commit (`.autocoder/` excluded), diff, rollback, merge, hardened lockfile (atomic O_EXCL acquire, stale-dead-PID auto-recovery, ownership-checked release), worktree create/remove/prune (registry-lock serialized); orphan cleanup scoped to AutoCoder branch shapes only
 anticheat.py    Protect-tests mode: read-only test files, audit violations
 logger.py       Thread-safe JSONL logging + dead-letter queue for failures
 telemetry.py    Thread-safe per-phase cost/token tracking; Phase enum incl. IMPLEMENT_BRIEF, PRE_VERIFY_CRITIQUE, REVIEW_MULTI, REVIEW_EXTERNAL, TASK_PLAN, TASK_EXEC; optional event-bus pub/sub for dashboard
@@ -119,6 +119,7 @@ Templates:
 - **External reviewer**: preset shortcuts (`codex`, `gemini`, `claude`) expand to canonical commands via `EXTERNAL_REVIEWER_PRESETS`; anything else is shlex-split; runs in parallel with primary review; findings unioned with dedup on `(file, description[:80].lower())`
 - **Cost control**: per-issue `--max-budget-usd` passed to Claude CLI; daily cap stops processing; per-phase `--brief-budget-usd`/`--pre-verify-budget-usd`/`--review-budget-usd` cap orchestrator spend; `budget.issue_exhausted()` guards every paid phase — exhaustion raises `BudgetExhaustedError` (dead-lettered, never retried) instead of degrading into a $0.01 agent error
 - **Prompt context injection**: implement/task prompts receive the configured build/test/lint commands (`format_commands_block`), the FULL acceptance-criteria list from the untruncated body (`_criteria_block` — checkboxes, or plain bullets/numbered items under an Acceptance Criteria/Success Criteria/Definition of Done heading), and the latest issue comments (`format_discussion_block`, best-effort via `gh issue view --json comments`)
+- **Issue images**: GitHub-hosted screenshots/mockups referenced in the body/comments (markdown, `<img>`, bare attachment URLs; GitHub hosts only, max 5 × 5 MB) are downloaded via curl + `gh auth token` into `.autocoder/images/issue-<N>/` and injected into implement/plan/task prompts as `format_images_block`, which tells the agent to `Read` each file (Read renders local images); repo-relative paths so `--docker` works; best-effort, never fatal; `.autocoder/.gitignore` (`*`) + `commit_all`'s pathspec exclusion keep them out of commits
 - **Epics**: meta/tracking/epic-labeled issues auto-expanded; sub-issues processed individually, parent closed when all succeed
 - **Telemetry**: per-phase `Phase` enum (PLAN, IMPLEMENT_BRIEF, IMPLEMENT, PRE_VERIFY_CRITIQUE, REVIEW_FIX, REVIEW_MULTI, REVIEW_EXTERNAL, TESTPLAN_FIX, UPDATE_CLAUDE_MD, CI_FIX, BUILD_FIX); `FailureCategory` drives top-failure reasons
 - **Priority caching**: previously triaged issues skip redundant AI prioritization (`--force-prioritize` to bypass)

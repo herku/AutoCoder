@@ -145,6 +145,27 @@ def format_discussion_block(comments: list[str]) -> str:
     return block[:DISCUSSION_BLOCK_MAX]
 
 
+def format_images_block(paths: list[str]) -> str:
+    """Render locally downloaded issue images for the implementer.
+
+    The sandboxed agent has no network access, but its Read tool renders
+    local image files — so the orchestrator downloads issue screenshots and
+    this block points the agent at them. Paths are repo-relative (docker
+    mounts the repo at /workspace, so absolute host paths would dangle).
+    Returns "" when there are none."""
+    if not paths:
+        return ""
+    listing = "\n".join(f"- {p}" for p in paths)
+    return (
+        "\n## Issue images (screenshots/mockups attached to the issue)\n"
+        f"The issue references {len(paths)} image(s), downloaded locally. Use the\n"
+        "Read tool on EACH path below to view them BEFORE implementing — they may\n"
+        "contain UI mockups, error screenshots, or diagrams that constrain the design:\n"
+        f"{listing}\n"
+        "Do NOT commit these files or reference these paths in code.\n"
+    )
+
+
 CRITERIA_BLOCK_MAX = 6000
 
 
@@ -170,7 +191,7 @@ def _criteria_block(issue_body: str) -> str:
     return block[:CRITERIA_BLOCK_MAX]
 
 
-def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", triage_model: str = "", plan_mode: bool = False, brief: str = "", commands_block: str = "", discussion_block: str = "") -> str:
+def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", triage_model: str = "", plan_mode: bool = False, brief: str = "", commands_block: str = "", discussion_block: str = "", images_block: str = "") -> str:
     body = truncate_body(issue.body, PROMPT_BODY_MAX)
     verb = action_verb(issue)
     base = load("implement", repo_path or None).format(
@@ -181,22 +202,24 @@ def build_prompt(issue: Issue, error_context: str = "", repo_path: str = "", tri
         acceptance_criteria_block=_criteria_block(issue.body),
         commands_block=commands_block,
         discussion_block=discussion_block,
+        images_block=images_block,
         error_context_block=_error_block(error_context),
     )
     return base + _brief_block(brief)
 
 
-def build_plan_prompt(issue: Issue, repo_path: str = "") -> str:
+def build_plan_prompt(issue: Issue, repo_path: str = "", images_block: str = "") -> str:
     """Build a prompt for the planning phase (read-only analysis)."""
     body = truncate_body(issue.body, PROMPT_BODY_MAX)
     return load("plan", repo_path or None).format(
         issue_number=issue.number,
         issue_title=issue.title,
         body=body,
+        images_block=images_block,
     )
 
 
-def build_implement_prompt(issue: Issue, plan_text: str, error_context: str = "", repo_path: str = "", brief: str = "", commands_block: str = "", discussion_block: str = "") -> str:
+def build_implement_prompt(issue: Issue, plan_text: str, error_context: str = "", repo_path: str = "", brief: str = "", commands_block: str = "", discussion_block: str = "", images_block: str = "") -> str:
     """Build a prompt for the implementation phase, with plan as context."""
     body = truncate_body(issue.body, PROMPT_BODY_MAX)
     verb = action_verb(issue)
@@ -208,6 +231,7 @@ def build_implement_prompt(issue: Issue, plan_text: str, error_context: str = ""
         acceptance_criteria_block=_criteria_block(issue.body),
         commands_block=commands_block,
         discussion_block=discussion_block,
+        images_block=images_block,
         plan_text=plan_text,
         error_context_block=_error_block(error_context, "The previous attempt failed with these errors."),
     )
@@ -231,7 +255,7 @@ def build_task_plan_prompt(
 def build_task_execute_prompt(
     issue: Issue, plan_path: str, task_text: str,
     error_context: str = "", repo_path: str = "", commands_block: str = "",
-    discussion_block: str = "",
+    discussion_block: str = "", images_block: str = "",
 ) -> str:
     """Build the prompt for a single-task fresh-session executor."""
     body = truncate_body(issue.body, PROMPT_BODY_MAX)
@@ -244,6 +268,7 @@ def build_task_execute_prompt(
         acceptance_criteria_block=_criteria_block(issue.body),
         commands_block=commands_block,
         discussion_block=discussion_block,
+        images_block=images_block,
         plan_path=plan_path,
         task_text=task_text,
         error_context_block=_error_block(error_context),

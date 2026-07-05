@@ -2,7 +2,7 @@ Analyze GitHub issue #{issue_number}: {issue_title}
 
 Issue body:
 {body}
-
+{images_block}
 Instructions:
 - Read and analyze the codebase to understand the current architecture
 - Identify all files that need to be created or modified

@@ -354,3 +354,57 @@ def test_build_prompt_includes_discussion_block():
         discussion_block="\n## Issue discussion\n- alice: use v2 endpoint\n",
     )
     assert "use v2 endpoint" in prompt
+
+
+def test_format_images_block():
+    from autocoder.agent import format_images_block
+
+    assert format_images_block([]) == ""
+    block = format_images_block([
+        ".autocoder/images/issue-12/image-1.png",
+        ".autocoder/images/issue-12/image-2.jpg",
+    ])
+    assert ".autocoder/images/issue-12/image-1.png" in block
+    assert ".autocoder/images/issue-12/image-2.jpg" in block
+    assert "Read" in block
+    assert "2 image(s)" in block
+
+
+def test_build_prompt_includes_images_block():
+    from autocoder.agent import format_images_block
+
+    prompt = build_prompt(
+        _make_issue(),
+        images_block=format_images_block([".autocoder/images/issue-1/image-1.png"]),
+    )
+    assert ".autocoder/images/issue-1/image-1.png" in prompt
+
+
+def test_build_implement_prompt_includes_images_block():
+    from autocoder.agent import build_implement_prompt, format_images_block
+
+    prompt = build_implement_prompt(
+        _make_issue(), "the plan",
+        images_block=format_images_block([".autocoder/images/issue-1/image-1.png"]),
+    )
+    assert ".autocoder/images/issue-1/image-1.png" in prompt
+
+
+def test_build_task_execute_prompt_includes_images_block():
+    from autocoder.agent import build_task_execute_prompt, format_images_block
+
+    prompt = build_task_execute_prompt(
+        _make_issue(), ".autocoder/plan-1.md", "- [ ] Step 1: do it",
+        images_block=format_images_block([".autocoder/images/issue-1/image-1.png"]),
+    )
+    assert ".autocoder/images/issue-1/image-1.png" in prompt
+
+
+def test_build_plan_prompt_includes_images_block():
+    from autocoder.agent import build_plan_prompt, format_images_block
+
+    prompt = build_plan_prompt(
+        _make_issue(),
+        images_block=format_images_block([".autocoder/images/issue-1/image-1.png"]),
+    )
+    assert ".autocoder/images/issue-1/image-1.png" in prompt
