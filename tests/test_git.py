@@ -82,6 +82,86 @@ def test_lockfile(git_repo):
     git2.release_lock()
 
 
+def _lockfile_path(git_repo):
+    return os.path.join(git_repo, ".autocoder", ".autocoder.lock")
+
+
+def _write_lockfile(git_repo, content):
+    os.makedirs(os.path.dirname(_lockfile_path(git_repo)), exist_ok=True)
+    with open(_lockfile_path(git_repo), "w") as f:
+        f.write(content)
+
+
+def test_stale_lock_dead_pid_auto_recovers(git_repo):
+    proc = subprocess.Popen(["sleep", "0"])
+    proc.wait()  # reaped — the PID no longer exists
+    _write_lockfile(git_repo, str(proc.pid))
+    git = GitOps(git_repo)
+    git.acquire_lock()
+    with open(_lockfile_path(git_repo)) as f:
+        assert f.read().strip() == str(os.getpid())
+    git.release_lock()
+
+
+def test_live_pid_lock_still_raises(git_repo):
+    _write_lockfile(git_repo, str(os.getpid()))
+    git = GitOps(git_repo)
+    with pytest.raises(LockError, match="Remove"):
+        git.acquire_lock()
+    # Live lock must not be auto-removed
+    assert os.path.exists(_lockfile_path(git_repo))
+
+
+def test_corrupt_lock_raises_not_removed(git_repo):
+    _write_lockfile(git_repo, "garbage")
+    git = GitOps(git_repo)
+    with pytest.raises(LockError, match="unknown"):
+        git.acquire_lock()
+    assert os.path.exists(_lockfile_path(git_repo))
+
+
+def test_release_does_not_remove_foreign_lock(git_repo):
+    git = GitOps(git_repo)
+    git.acquire_lock()
+    _write_lockfile(git_repo, str(os.getpid() + 1))
+    git.release_lock()
+    assert os.path.exists(_lockfile_path(git_repo))
+
+
+def test_double_acquire_same_instance_is_noop(git_repo):
+    git = GitOps(git_repo)
+    git.acquire_lock()
+    git.acquire_lock()  # must not raise
+    git.release_lock()
+
+
+def test_acquire_writes_autocoder_gitignore(git_repo):
+    git = GitOps(git_repo)
+    git.acquire_lock()
+    gitignore = os.path.join(git_repo, ".autocoder", ".gitignore")
+    with open(gitignore) as f:
+        assert f.read().strip() == "*"
+    git.release_lock()
+
+
+def test_commit_all_excludes_autocoder_dir(git_repo):
+    images_dir = os.path.join(git_repo, ".autocoder", "images", "issue-1")
+    os.makedirs(images_dir)
+    with open(os.path.join(images_dir, "x.png"), "wb") as f:
+        f.write(b"\x89PNG")
+    with open(os.path.join(git_repo, "src.py"), "w") as f:
+        f.write("print('hi')\n")
+    git = GitOps(git_repo)
+    git.commit_all("add source")
+    result = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", "HEAD"],
+        cwd=git_repo, capture_output=True, text=True, check=True,
+    )
+    files = result.stdout.split()
+    assert "src.py" in files
+    assert not any(f.startswith(".autocoder/") for f in files)
+
+
 def test_cleanup_orphan_branches(git_repo):
     git = GitOps(git_repo)
     autocoder_branches = ("ai/issue-99", "feat/42-fix-bug", "feat/7", "autocoder-wt-x-3")

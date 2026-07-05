@@ -31,6 +31,29 @@ def _is_plan_only_file(filepath: str) -> bool:
     return bool(_PLAN_ONLY_PATTERN.match(basename))
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:  # e.g. PermissionError — exists but owned by another user
+        return True
+    return True
+
+
+def ensure_autocoder_ignored(repo_path: str) -> None:
+    """Make {repo}/.autocoder self-ignoring so its contents (lockfile, caches,
+    plan files, downloaded issue images) can never be swept into a commit by
+    `git add -A` — the target repo's own .gitignore can't be relied on."""
+    gitignore = Path(repo_path) / ".autocoder" / ".gitignore"
+    try:
+        if not gitignore.exists():
+            gitignore.parent.mkdir(parents=True, exist_ok=True)
+            gitignore.write_text("*\n")
+    except OSError:
+        pass
+
+
 def _slugify(title: str, max_len: int = 40) -> str:
     """Convert issue title to a branch-name-safe slug."""
     # Remove emoji and special chars, lowercase
@@ -50,6 +73,7 @@ class GitOps:
         self.repo_path = repo_path
         self._lockfile = Path(repo_path) / ".autocoder" / ".autocoder.lock"
         self._lock_held = False
+        self._atexit_registered = False
 
     def _run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -60,22 +84,58 @@ class GitOps:
             check=check,
         )
 
+    def _read_lock_pid(self) -> int | None:
+        try:
+            return int(self._lockfile.read_text().strip())
+        except (OSError, ValueError):
+            return None
+
     def acquire_lock(self) -> None:
-        if self._lockfile.exists():
-            pid = self._lockfile.read_text().strip()
-            raise LockError(
-                f"Another AutoCoder instance is running (PID {pid}). "
-                f"Remove {self._lockfile} if this is stale."
-            )
+        if self._lock_held:
+            return
         self._lockfile.parent.mkdir(parents=True, exist_ok=True)
-        self._lockfile.write_text(str(os.getpid()))
-        self._lock_held = True
-        atexit.register(self.release_lock)
+        ensure_autocoder_ignored(self.repo_path)
+        for attempt in (1, 2):
+            try:
+                # O_EXCL makes creation atomic — two racing processes can't
+                # both pass an exists() check and clobber each other's lock.
+                fd = os.open(self._lockfile, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                pid = self._read_lock_pid()
+                # Only a parsed PID confirmed dead is stale. Unreadable/empty
+                # content may be a live lock caught between another process's
+                # O_EXCL create and its PID write — never auto-remove those.
+                if attempt == 1 and pid is not None and not _pid_alive(pid):
+                    print(f"  Removing stale AutoCoder lock from dead PID {pid}.")
+                    try:
+                        self._lockfile.unlink()
+                    except FileNotFoundError:
+                        pass  # another process cleaned it first; O_EXCL decides
+                    continue
+                raise LockError(
+                    f"Another AutoCoder instance is running "
+                    f"(PID {pid if pid is not None else 'unknown'}). "
+                    f"Remove {self._lockfile} if this is stale."
+                )
+            with os.fdopen(fd, "w") as f:
+                f.write(str(os.getpid()))
+            self._lock_held = True
+            if not self._atexit_registered:
+                atexit.register(self.release_lock)
+                self._atexit_registered = True
+            return
 
     def release_lock(self) -> None:
-        if self._lock_held and self._lockfile.exists():
-            self._lockfile.unlink()
-            self._lock_held = False
+        if not self._lock_held:
+            return
+        self._lock_held = False
+        try:
+            # Ownership check: never delete a lock another process re-acquired
+            # after ours was manually removed.
+            if self._lockfile.read_text().strip() == str(os.getpid()):
+                self._lockfile.unlink()
+        except OSError:
+            pass
 
     def assert_clean(self) -> None:
         result = self._run("status", "--porcelain")
@@ -150,7 +210,10 @@ class GitOps:
         self._run("branch", "-D", branch, check=False)
 
     def commit_all(self, message: str) -> None:
-        self._run("add", "-A")
+        # .autocoder/ holds run-state (lockfile, caches, plan files, downloaded
+        # issue images) that must never ride along into a commit, even when the
+        # target repo's .gitignore doesn't cover it.
+        self._run("add", "-A", "--", ".", ":(exclude).autocoder")
         # Check if there are staged changes to commit
         status = self._run("diff", "--cached", "--quiet", check=False)
         if status.returncode == 0:
