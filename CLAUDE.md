@@ -21,12 +21,12 @@ loop.py         Main orchestration: fetch → prioritize → brief → implement
 agent.py        Invokes Claude Code CLI subprocess via Popen+watchdog (idle/session timeouts); rate-limit/auth detection; rate-limit wait+retry; brief/task/learn prompt builders
 build.py        AI-powered build command detection (claude -p) with heuristic fallback
 sandbox.py      SandboxConfig: per-phase scoped allowed tools (implement/plan/brief/review/claude_md/detect)
-issues.py       GitHub CLI wrapper: fetch/parse issues, extract acceptance criteria, priority caching
+issues.py       GitHub CLI wrapper: fetch/parse issues + comments, priority caching
 review.py       Single-reviewer + multi-agent orchestrator; external-reviewer subprocess; fix/ci_fix/build_fix prompt builders
 testplan.py     Acceptance criteria verification against diff
 verify.py       Runs lint/unit/integration/build tests (stops on first failure)
 budget.py       Token & cost tracking (per-issue + daily cap); thread-local per-issue tokens, locked daily totals
-git.py          GitOps class: branching, commit, diff, rollback, merge, lockfile, worktree create/remove/prune
+git.py          GitOps class: branching, commit, diff, rollback, merge, lockfile, worktree create/remove/prune (registry-lock serialized); orphan cleanup scoped to AutoCoder branch shapes only
 anticheat.py    Protect-tests mode: read-only test files, audit violations
 logger.py       Thread-safe JSONL logging + dead-letter queue for failures
 telemetry.py    Thread-safe per-phase cost/token tracking; Phase enum incl. IMPLEMENT_BRIEF, PRE_VERIFY_CRITIQUE, REVIEW_MULTI, REVIEW_EXTERNAL, TASK_PLAN, TASK_EXEC; optional event-bus pub/sub for dashboard
@@ -68,7 +68,7 @@ Templates live in `src/autocoder/prompts/*.md`. Loaded via `prompts.load(name, r
 
 - **Repo overrides**: `{repo}/.autocoder/prompts/<name>.md` wins over the packaged default. Same for `{repo}/.autocoder/prompts/agents/<name>.md`.
 - **Agent expansion**: `{{agent:X}}` markers are replaced with the content of `agents/X.md` (braces in expanded content are doubled so later `str.format()` calls leave them alone).
-- **Caching**: `@lru_cache` on `load()`.
+- **Caching**: mtime-aware per-file read cache — override edits/additions take effect live (serve-safe); `load.cache_clear()` still supported.
 
 Templates:
 
@@ -118,12 +118,12 @@ Templates:
 - **Stalemate detection**: `StalemateTracker` in loop.py; CI-fix and multi-review loops abort after N consecutive no-SHA-change iterations; categorized as `CI_STALEMATE`
 - **External reviewer**: preset shortcuts (`codex`, `gemini`, `claude`) expand to canonical commands via `EXTERNAL_REVIEWER_PRESETS`; anything else is shlex-split; runs in parallel with primary review; findings unioned with dedup on `(file, description[:80].lower())`
 - **Cost control**: per-issue `--max-budget-usd` passed to Claude CLI; daily cap stops processing; per-phase `--brief-budget-usd`/`--pre-verify-budget-usd`/`--review-budget-usd` cap orchestrator spend; `budget.issue_exhausted()` guards every paid phase — exhaustion raises `BudgetExhaustedError` (dead-lettered, never retried) instead of degrading into a $0.01 agent error
-- **Prompt context injection**: implement/task prompts receive the configured build/test/lint commands (`format_commands_block`) and the FULL acceptance-criteria list extracted from the untruncated issue body (`_criteria_block`) — the 4000-char body truncation no longer hides criteria from the implementer
+- **Prompt context injection**: implement/task prompts receive the configured build/test/lint commands (`format_commands_block`), the FULL acceptance-criteria list from the untruncated body (`_criteria_block` — checkboxes, or plain bullets/numbered items under an Acceptance Criteria/Success Criteria/Definition of Done heading), and the latest issue comments (`format_discussion_block`, best-effort via `gh issue view --json comments`)
 - **Epics**: meta/tracking/epic-labeled issues auto-expanded; sub-issues processed individually, parent closed when all succeed
 - **Telemetry**: per-phase `Phase` enum (PLAN, IMPLEMENT_BRIEF, IMPLEMENT, PRE_VERIFY_CRITIQUE, REVIEW_FIX, REVIEW_MULTI, REVIEW_EXTERNAL, TESTPLAN_FIX, UPDATE_CLAUDE_MD, CI_FIX, BUILD_FIX); `FailureCategory` drives top-failure reasons
 - **Priority caching**: previously triaged issues skip redundant AI prioritization (`--force-prioritize` to bypass)
 - **Docker freshness**: images auto-rebuild after `--docker-max-age-days`; `--update-docker` forces `--no-cache` rebuild
-- **Learning loops**: `impl_learn.md` runs after every success; `ci_learn.md` runs after each CI fix push — both write to the target repo's CLAUDE.md to persist tribal knowledge
+- **Learning loops**: `impl_learn.md` runs after every success; `ci_learn.md` runs after each CI fix push — both write to the target repo's CLAUDE.md; re-runs of dead-lettered issues seed attempt context from `failed_issues.jsonl` (`RunLogger.prior_failures`)
 - **Error detection**: rate-limit and auth-error pattern matching; rate-limit can wait+retry, auth-error always aborts
 - **Pre-flight**: build command runs on `main` before any issue processing; aborts if main is broken
 - **Logging**: `logs/` JSONL records per run; `failed_issues.jsonl` dead-letter queue
