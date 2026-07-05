@@ -46,6 +46,51 @@ def test_build_prompt_with_error_context():
     assert "DIFFERENT approach" in prompt
 
 
+def test_format_commands_block_lists_configured_commands():
+    from autocoder.agent import format_commands_block
+
+    block = format_commands_block("npm run build", "npm test", "npm run lint")
+    assert "`npm run lint`" in block
+    assert "`npm test`" in block
+    assert "`npm run build`" in block
+    assert "Project commands" in block
+
+
+def test_format_commands_block_empty_when_nothing_configured():
+    from autocoder.agent import format_commands_block
+
+    assert format_commands_block(None, None, None, None) == ""
+
+
+def test_build_prompt_includes_commands_block():
+    prompt = build_prompt(_make_issue(), commands_block="\n## Project commands\n- Tests: `uv run pytest`\n")
+    assert "uv run pytest" in prompt
+
+
+def test_build_prompt_includes_criteria_past_body_truncation():
+    # Criteria sit past the 4000-char body cap; the implementer must still see them.
+    body = ("x" * 4500) + "\n\n- [ ] hidden criterion alpha\n- [ ] hidden criterion beta\n"
+    prompt = build_prompt(_make_issue(body=body))
+    assert "Acceptance criteria (complete list)" in prompt
+    assert "hidden criterion alpha" in prompt
+    assert "hidden criterion beta" in prompt
+
+
+def test_build_prompt_no_criteria_block_without_checkboxes():
+    prompt = build_prompt(_make_issue())
+    assert "Acceptance criteria (complete list)" not in prompt
+
+
+def test_build_implement_prompt_includes_criteria_and_commands():
+    body = "Fix it.\n- [ ] returns 200\n- [ ] logs the request"
+    prompt = build_implement_prompt(
+        _make_issue(body=body), "1. do the thing",
+        commands_block="\n## Project commands\n- Build: `make build`\n",
+    )
+    assert "returns 200" in prompt
+    assert "make build" in prompt
+
+
 def test_parse_agent_output_json():
     data = {
         "session_id": "sess-123",

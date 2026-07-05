@@ -11,7 +11,7 @@ from pathlib import Path
 
 from autocoder.agent import (
     build_prompt, build_plan_prompt, build_implement_prompt,
-    build_task_plan_prompt, build_task_execute_prompt,
+    build_task_plan_prompt, build_task_execute_prompt, format_commands_block,
     build_update_claude_md_prompt, build_ci_learn_prompt, build_impl_learn_prompt,
     generate_implement_brief,
     invoke_agent, set_rate_limit_wait, set_timeouts,
@@ -393,6 +393,9 @@ def process_issue(
     verify_results = []
     build_failures = 0
     sandbox = build_sandbox(cfg)
+    commands_block = format_commands_block(
+        cfg.build_cmd, cfg.test_cmd, cfg.lint_cmd, cfg.integration_cmd,
+    )
     plan_sandbox = build_plan_sandbox(cfg) if cfg.plan_mode else None
     budget.reset_issue()
     tag = f"#{issue.number}"
@@ -442,6 +445,7 @@ def process_issue(
                 with StepTimer(f"task_slice {tag} {att}", timings):
                     ok, ts_err, ts_result = _run_task_slice(
                         issue, cfg, git, budget, telem, brief_text, sandbox,
+                        commands_block=commands_block,
                     )
                 if ok:
                     agent_result = ts_result
@@ -481,6 +485,7 @@ def process_issue(
                     # Phase 2: Implement with plan context (+ brief if present)
                     prompt = build_implement_prompt(
                         issue, plan_text, mono_err_ctx, cfg.repo_path, brief=brief_text,
+                        commands_block=commands_block,
                     )
                 else:
                     prompt = build_prompt(
@@ -488,6 +493,7 @@ def process_issue(
                         error_context=mono_err_ctx,
                         repo_path=cfg.repo_path,
                         brief=brief_text,
+                        commands_block=commands_block,
                     )
 
                 with StepTimer(f"agent {tag} {att}", timings):
@@ -871,7 +877,7 @@ def _process_issues_parallel(
 
 def _run_task_slice(
     issue, cfg: RunConfig, git: GitOps, budget: BudgetTracker, telem: Telemetry,
-    brief_text: str, sandbox: SandboxConfig,
+    brief_text: str, sandbox: SandboxConfig, commands_block: str = "",
 ) -> tuple[bool, str, AgentResult | None]:
     """Run the task-sliced implement flow.
 
@@ -953,6 +959,7 @@ def _run_task_slice(
             exec_prompt = build_task_execute_prompt(
                 issue, str(plan_p), current.text,
                 error_context=task_err, repo_path=cfg.repo_path,
+                commands_block=commands_block,
             )
             max_budget = budget.remaining_for_issue_usd(cfg.model)
             t_result = invoke_agent(
