@@ -168,6 +168,86 @@ def test_blocked_with_escalation_disabled_raises():
         )
 
 
+# ---------- implement retry-context accumulation ----------
+
+
+def _issue(num: int = 7, body: str = "Fix the thing."):
+    from autocoder.types import Issue, Priority
+    return Issue(number=num, title="Fix", body=body, labels=[],
+                 priority=Priority.P2, url="https://example/7")
+
+
+def _err_result(text: str) -> AgentResult:
+    r = _result(text=text)
+    r.is_error = True
+    return r
+
+
+def test_format_impl_attempt_caps_length():
+    from autocoder.loop import _format_impl_attempt, _IMPL_ATTEMPT_MAX
+    formatted = _format_impl_attempt(2, "x" * 10_000)
+    assert "## Attempt 2 failed" in formatted
+    assert len(formatted) < _IMPL_ATTEMPT_MAX + 100
+
+
+def test_process_issue_accumulates_failure_context_across_attempts():
+    from autocoder.loop import process_issue, StepTimings
+    prompts: list[str] = []
+
+    def fake_invoke(prompt, *args, **kwargs):
+        prompts.append(prompt)
+        return _err_result(f"FAILURE_MARKER_{len(prompts)}")
+
+    cfg = _cfg(max_retries=3, implement_brief=False, pre_verify_critique=False)
+    with patch("autocoder.loop.invoke_agent", side_effect=fake_invoke), \
+         patch("autocoder.loop.label_failed"), \
+         patch("autocoder.loop.comment_failure"):
+        process_issue(_issue(), cfg, MagicMock(), _budget(), MagicMock(),
+                      StepTimings(), Telemetry())
+
+    assert len(prompts) == 3
+    assert "FAILURE_MARKER_1" not in prompts[0]
+    # Attempt 2 sees attempt 1's failure; attempt 3 sees BOTH prior failures.
+    assert "FAILURE_MARKER_1" in prompts[1]
+    assert "FAILURE_MARKER_1" in prompts[2]
+    assert "FAILURE_MARKER_2" in prompts[2]
+
+
+def test_process_issue_latest_failure_not_lost_after_earlier_verify_failure():
+    # Regression for the stale-context bug: attempt 1 fails verification
+    # (which sets error_context), attempt 2 fails with an agent error — the
+    # old `if not error_context` guard dropped attempt 2's failure entirely.
+    from autocoder.loop import process_issue, StepTimings
+    from autocoder.types import VerifyResult
+    prompts: list[str] = []
+    calls = {"n": 0}
+
+    def fake_invoke(prompt, *args, **kwargs):
+        prompts.append(prompt)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _result(text="implemented")
+        return _err_result("AGENT_EXPLODED_ATTEMPT_2")
+
+    failing = [VerifyResult(passed=False, stage="unit", exit_code=1,
+                            stdout="assert failed in test_foo_bar", stderr="",
+                            duration_ms=1)]
+    cfg = _cfg(max_retries=3, implement_brief=False, pre_verify_critique=False)
+    with patch("autocoder.loop.invoke_agent", side_effect=fake_invoke), \
+         patch("autocoder.loop.run_verification", return_value=failing), \
+         patch("autocoder.loop.label_failed"), \
+         patch("autocoder.loop.comment_failure"):
+        process_issue(_issue(), cfg, MagicMock(), _budget(), MagicMock(),
+                      StepTimings(), Telemetry())
+
+    assert len(prompts) == 3
+    assert "test_foo_bar" in prompts[1]
+    # The fresh attempt-2 failure MUST reach attempt 3's context.
+    assert "AGENT_EXPLODED_ATTEMPT_2" in prompts[2]
+    # And the older failure is still present (accumulated, not replaced).
+    assert "test_foo_bar" in prompts[2]
+
+
 # ---------- ci_fix_arch escalation ----------
 
 

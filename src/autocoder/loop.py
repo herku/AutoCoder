@@ -384,11 +384,23 @@ def _handle_implementer_status(
     return escalated
 
 
+_IMPL_ATTEMPTS_KEPT = 3
+_IMPL_ATTEMPT_MAX = 2_000
+
+
+def _format_impl_attempt(attempt: int, error: str) -> str:
+    """Format one failed implement attempt for cross-attempt context accumulation."""
+    return f"## Attempt {attempt} failed\n{error[:_IMPL_ATTEMPT_MAX]}\n---"
+
+
 def process_issue(
     issue, cfg: RunConfig, git: GitOps, budget: BudgetTracker, log: RunLogger,
     timings: StepTimings, telem: Telemetry,
 ) -> None:
-    error_context = ""
+    # Every failed attempt is appended here so later attempts see what was
+    # already tried — a single scalar context loses the history (and used to
+    # go stale when a later attempt failed without setting it).
+    attempt_failures: list[str] = []
     agent_result = None
     verify_results = []
     build_failures = 0
@@ -405,6 +417,7 @@ def process_issue(
         agent_result = None
         verify_results = []
         protected_files: list[str] = []
+        error_context = ""  # this attempt's failure detail; reset so it can't go stale
         att = f"att{attempt}"
 
         checkpoint = git.save_checkpoint()
@@ -462,10 +475,12 @@ def process_issue(
                     )
 
             if not use_task_slice:
-                # Monolithic implement path.
-                mono_err_ctx = error_context
-                if task_slice_fallback_ctx and not mono_err_ctx:
-                    mono_err_ctx = task_slice_fallback_ctx
+                # Monolithic implement path. Feed the accumulated history of
+                # prior failed attempts (bounded) so the agent knows what has
+                # already been tried, mirroring the CI-fix loop.
+                mono_err_ctx = "\n\n".join(attempt_failures[-_IMPL_ATTEMPTS_KEPT:])
+                if task_slice_fallback_ctx:
+                    mono_err_ctx = f"{mono_err_ctx}\n\n{task_slice_fallback_ctx}".strip()
 
                 if cfg.plan_mode and plan_sandbox:
                     # Phase 1: Plan (read-only)
@@ -757,14 +772,17 @@ def process_issue(
                     Outcome.RETRY, error=str(e), telemetry=issue_telem,
                 )
                 print(f"  Attempt {attempt} failed: {str(e)[:200]}")
-                if not error_context:
-                    if isinstance(e, IdleTimeoutError):
-                        error_context = (
-                            f"Previous attempt hung silently ({str(e)}). "
-                            "Make visible progress early — prefer small incremental edits and avoid long silent thinking."
-                        )
-                    else:
-                        error_context = str(e)
+                # Record THIS attempt's failure unconditionally. error_context
+                # (set in the try block before raising) carries the full
+                # verify/critique output; str(e) is a truncated fallback.
+                if isinstance(e, IdleTimeoutError):
+                    failure_text = (
+                        f"Attempt hung silently ({str(e)}). "
+                        "Make visible progress early — prefer small incremental edits and avoid long silent thinking."
+                    )
+                else:
+                    failure_text = error_context or str(e)
+                attempt_failures.append(_format_impl_attempt(attempt, failure_text))
             else:
                 # Final failure
                 issue_telem = telem.end_issue(outcome=Outcome.SKIP.value)
@@ -786,7 +804,11 @@ def process_issue(
                 restore_test_files(protected_files)
             git.rollback(checkpoint)
             git.checkout_main()
-            error_context = "Previous attempt timed out. Use a simpler approach."
+            attempt_failures.append(_format_impl_attempt(
+                attempt,
+                "Attempt exceeded the wall-clock timeout before finishing. "
+                "Use a simpler, more incremental approach.",
+            ))
             log.log_attempt(
                 issue, attempt, agent_result, verify_results,
                 Outcome.RETRY, error="timeout", telemetry=issue_telem,
