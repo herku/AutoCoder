@@ -50,3 +50,18 @@ def test_reset_issue():
     usd = bt.remaining_for_issue_usd("sonnet")
     assert usd > 0
     assert bt.summary()["daily_total_tokens"] == 10_000
+
+
+def test_issue_exhausted_transitions():
+    bt = BudgetTracker(per_issue_token_budget=10_000, daily_cap_tokens=100_000)
+    assert not bt.issue_exhausted()
+    bt.record(_make_result(tokens_in=6000, tokens_out=4000))
+    assert bt.issue_exhausted()
+    bt.reset_issue()
+    assert not bt.issue_exhausted()
+
+
+def test_issue_tokens_used():
+    bt = BudgetTracker(per_issue_token_budget=10_000, daily_cap_tokens=100_000)
+    bt.record(_make_result(tokens_in=1000, tokens_out=500))
+    assert bt.issue_tokens_used == 1500

@@ -201,6 +201,16 @@ class ImplementerBlockedError(AgentError):
     pass
 
 
+class BudgetExhaustedError(Exception):
+    """Per-issue token budget spent before the pipeline finished.
+
+    Deliberately NOT an AgentError subclass: budget exhaustion is a policy
+    stop, not an agent failure, and must not be misclassified (or retried —
+    a retry with zero budget can only fail again).
+    """
+    pass
+
+
 class VerificationError(Exception):
     def __init__(self, stage: str, output: str):
         self.stage = stage

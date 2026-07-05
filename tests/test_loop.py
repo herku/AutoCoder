@@ -91,6 +91,7 @@ def _telem_with_issue(num: int = 1) -> Telemetry:
 def _budget():
     bt = MagicMock()
     bt.remaining_for_issue_usd.return_value = 5.0
+    bt.issue_exhausted.return_value = False
     return bt
 
 
@@ -255,6 +256,47 @@ def test_in_place_fix_records_verify_fix_phase():
         )
     phases = [p.phase for p in telem._get_current().phases]
     assert Phase.VERIFY_FIX in phases
+
+
+# ---------- budget exhaustion guard ----------
+
+
+def test_process_issue_budget_exhausted_dead_letters_without_retry():
+    from autocoder.loop import process_issue, StepTimings
+    from autocoder.telemetry import FailureCategory
+
+    bt = _budget()
+    bt.issue_exhausted.return_value = True
+    bt.issue_tokens_used = 500_001
+    bt.per_issue_token_budget = 500_000
+    telem = MagicMock()
+    log = MagicMock()
+    cfg = _cfg(max_retries=3)
+    with patch("autocoder.loop.invoke_agent") as mock_invoke, \
+         patch("autocoder.loop.label_failed"), \
+         patch("autocoder.loop.comment_failure"):
+        process_issue(_issue(), cfg, MagicMock(), bt, log, StepTimings(), telem)
+
+    # No agent ever runs with a zero budget, and there is exactly one attempt.
+    mock_invoke.assert_not_called()
+    telem.record_failure.assert_any_call(FailureCategory.BUDGET_EXHAUSTED)
+    log.dead_letter.assert_called_once()
+    assert "Budget exhausted" in log.dead_letter.call_args.args[1]
+
+
+def test_in_place_fix_skipped_when_budget_exhausted():
+    from autocoder.loop import _attempt_in_place_fix
+
+    bt = _budget()
+    bt.issue_exhausted.return_value = True
+    failing = [_verify_fail("unit")]
+    with patch("autocoder.loop.invoke_agent") as mock_invoke:
+        out = _attempt_in_place_fix(
+            failing, _cfg(), bt, _telem_with_issue(), _sbx(), _timings(),
+            "#1", "att1",
+        )
+    assert out is failing
+    mock_invoke.assert_not_called()
 
 
 # ---------- testplan gating ----------

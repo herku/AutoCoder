@@ -45,6 +45,7 @@ from autocoder.types import (
     AgentResult,
     AntiCheatViolation,
     AuthenticationError,
+    BudgetExhaustedError,
     IdleTimeoutError,
     ImplementerBlockedError,
     ImplementerStatus,
@@ -385,6 +386,20 @@ def _handle_implementer_status(
     return escalated
 
 
+def _require_issue_budget(budget: BudgetTracker, phase_name: str) -> None:
+    """Refuse to start a paid phase with an exhausted per-issue budget.
+
+    Without this, exhaustion surfaced as a $0.01 --max-budget-usd that made
+    the agent error out instantly — misclassified as AGENT_ERROR and retried
+    with the same zero budget.
+    """
+    if budget.issue_exhausted():
+        raise BudgetExhaustedError(
+            f"Per-issue token budget exhausted before {phase_name} "
+            f"(spent {budget.issue_tokens_used} of {budget.per_issue_token_budget} tokens)"
+        )
+
+
 def _attempt_in_place_fix(
     verify_results: list, cfg: RunConfig, budget: BudgetTracker, telem: Telemetry,
     sandbox: SandboxConfig, timings: StepTimings, tag: str, att: str,
@@ -401,6 +416,12 @@ def _attempt_in_place_fix(
     results when the fix could not run or errored. Rollback/retry policy
     stays with the caller.
     """
+    if budget.issue_exhausted():
+        # Let the caller raise VerificationError; the next attempt's budget
+        # guard converts it into a clean BudgetExhaustedError stop.
+        print("  Skipping in-place fix: issue budget exhausted.")
+        return verify_results
+
     failed = next(v for v in verify_results if not v.passed)
     if failed.stage == "build":
         print(f"  Build failed. Attempting fix...")
@@ -483,6 +504,8 @@ def process_issue(
             branch = git.create_branch(issue.number, issue.title)
 
         try:
+            _require_issue_budget(budget, f"attempt {attempt}")
+
             # Protect test files if enabled
             if cfg.protect_tests:
                 protected_files = protect_test_files(cfg.repo_path, cfg.test_patterns)
@@ -654,6 +677,7 @@ def process_issue(
                     for item in failed_items:
                         print(f"    - {item.criterion[:80]}")
 
+                    _require_issue_budget(budget, "test plan fix")
                     with StepTimer(f"test_plan_fix {tag}", timings):
                         fix_prompt = build_test_plan_fix_prompt(issue, failed_items, cfg.repo_path)
                         max_budget = budget.remaining_for_issue_usd(cfg.model)
@@ -782,6 +806,30 @@ def process_issue(
             git.checkout_main()
             raise  # Propagate to run() to stop all processing
 
+        except BudgetExhaustedError as e:
+            # Policy stop, not an agent failure — never retried: another
+            # attempt would start with the same zero budget.
+            telem.record_failure(FailureCategory.BUDGET_EXHAUSTED)
+            if protected_files:
+                restore_test_files(protected_files)
+            git.rollback(checkpoint)
+            git.checkout_main()
+            issue_telem = telem.end_issue(outcome=Outcome.SKIP.value)
+            log.log_attempt(
+                issue, attempt, agent_result, verify_results,
+                Outcome.SKIP, error=str(e), telemetry=issue_telem,
+            )
+            log.dead_letter(
+                issue, f"Budget exhausted: {e}", telemetry=issue_telem,
+                attempts=attempt,
+                status_detail=agent_result.status_detail if agent_result else None,
+            )
+            label_failed(cfg.repo_path, issue.number)
+            comment_failure(cfg.repo_path, issue.number, str(e))
+            git.delete_branch(branch)
+            print(f"  {e}. Dead-lettered (no retry).\n")
+            return
+
         except (AgentError, VerificationError, AntiCheatViolation, RuntimeError) as e:
             # Classify failure for telemetry
             if isinstance(e, VerificationError):
@@ -807,7 +855,11 @@ def process_issue(
                             issue, attempt, agent_result, verify_results,
                             Outcome.SKIP, error=str(e), telemetry=issue_telem,
                         )
-                        log.dead_letter(issue, f"Build failed after {cfg.build_retries} retries: {e}")
+                        log.dead_letter(
+                            issue, f"Build failed after {cfg.build_retries} retries: {e}",
+                            telemetry=issue_telem, attempts=attempt,
+                            status_detail=agent_result.status_detail if agent_result else None,
+                        )
                         label_failed(cfg.repo_path, issue.number)
                         comment_failure(cfg.repo_path, issue.number, str(e))
                         git.delete_branch(branch)
@@ -853,7 +905,10 @@ def process_issue(
                     issue, attempt, agent_result, verify_results,
                     Outcome.SKIP, error=str(e), telemetry=issue_telem,
                 )
-                log.dead_letter(issue, str(e))
+                log.dead_letter(
+                    issue, str(e), telemetry=issue_telem, attempts=attempt,
+                    status_detail=agent_result.status_detail if agent_result else None,
+                )
                 label_failed(cfg.repo_path, issue.number)
                 comment_failure(cfg.repo_path, issue.number, str(e))
                 git.delete_branch(branch)

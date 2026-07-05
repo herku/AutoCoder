@@ -57,6 +57,14 @@ class BudgetTracker:
     def reset_issue(self) -> None:
         self._set_issue_tokens(0)
 
+    def issue_exhausted(self) -> bool:
+        """True once the current issue has spent its full token budget.
+
+        Callers should check this BEFORE starting a paid phase; the $0.01
+        floor in remaining_for_issue_usd remains as a mid-phase backstop.
+        """
+        return self.per_issue_token_budget - self._get_issue_tokens() <= 0
+
     def remaining_for_issue_usd(self, model: str = "sonnet") -> float:
         remaining_tokens = self.per_issue_token_budget - self._get_issue_tokens()
         if remaining_tokens <= 0:
@@ -66,6 +74,10 @@ class BudgetTracker:
         # Assume 60% input, 40% output ratio
         estimated_cost = (remaining_tokens * 0.6 * input_price + remaining_tokens * 0.4 * output_price) / 1_000_000
         return round(max(estimated_cost, 0.01), 2)
+
+    @property
+    def issue_tokens_used(self) -> int:
+        return self._get_issue_tokens()
 
     @property
     def daily_tokens_used(self) -> int:

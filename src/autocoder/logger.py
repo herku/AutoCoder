@@ -124,18 +124,42 @@ class RunLogger:
         }
         self._append(self._log_path, record)
 
-    def dead_letter(self, issue: Issue, error: str) -> None:
-        self._append(
-            self._dead_letter_path,
-            {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "run_id": self._run_id,
-                "issue_num": issue.number,
-                "title": issue.title,
-                "url": issue.url,
-                "error": error,
-            },
-        )
+    def dead_letter(
+        self,
+        issue: Issue,
+        error: str,
+        *,
+        telemetry: Optional[IssueTelemetry] = None,
+        attempts: Optional[int] = None,
+        status_detail: Optional[str] = None,
+    ) -> None:
+        """Record a permanently failed issue.
+
+        The optional fields make the dead-letter queue actionable: without
+        the phase, category, and spend, a record says only THAT an issue
+        failed — not where, how expensively, or with what final state.
+        """
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": self._run_id,
+            "issue_num": issue.number,
+            "title": issue.title,
+            "url": issue.url,
+            "error": error,
+        }
+        if attempts is not None:
+            record["attempts"] = attempts
+        if status_detail:
+            record["status_detail"] = status_detail
+        if telemetry is not None:
+            if telemetry.failure_category is not None:
+                record["failure_category"] = telemetry.failure_category.value
+            if telemetry.phases:
+                record["last_phase"] = telemetry.phases[-1].phase.value
+            record["cost_usd"] = round(telemetry.total_cost_usd, 4)
+            record["tokens_in"] = telemetry.total_tokens_in
+            record["tokens_out"] = telemetry.total_tokens_out
+        self._append(self._dead_letter_path, record)
 
     def log_run_summary(self, telem: Telemetry) -> None:
         from autocoder.telemetry import Telemetry as _T  # noqa: runtime import
