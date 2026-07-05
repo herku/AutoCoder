@@ -84,3 +84,44 @@ def test_agent_marker_override_also_overridable(tmp_path):
 
     text = load("orch", str(tmp_path))
     assert "OVERRIDDEN_ROLE" in text
+
+
+def test_load_picks_up_override_edits_without_cache_clear(tmp_path):
+    """Long-lived (--serve) processes must see live prompt-override edits."""
+    import os
+
+    prompts_dir = tmp_path / ".autocoder" / "prompts"
+    prompts_dir.mkdir(parents=True)
+    override = prompts_dir / "review.md"
+    override.write_text("FIRST {diff}\n")
+    assert load("review", str(tmp_path)).startswith("FIRST")
+
+    override.write_text("SECOND {diff}\n")
+    # Force a distinct mtime even on coarse-grained filesystems.
+    os.utime(override, (override.stat().st_atime, override.stat().st_mtime + 10))
+    assert load("review", str(tmp_path)).startswith("SECOND")
+
+
+def test_load_picks_up_override_added_after_first_load(tmp_path):
+    """The absence of an override must not be memoized forever."""
+    prompts_dir = tmp_path / ".autocoder" / "prompts"
+    prompts_dir.mkdir(parents=True)
+    assert "code reviewer" in load("review", str(tmp_path)).lower()
+
+    (prompts_dir / "review.md").write_text("LATE OVERRIDE {diff}\n")
+    assert load("review", str(tmp_path)).startswith("LATE OVERRIDE")
+
+
+def test_load_picks_up_agent_file_edits(tmp_path):
+    import os
+
+    prompts_dir = tmp_path / ".autocoder" / "prompts"
+    (prompts_dir / "agents").mkdir(parents=True)
+    (prompts_dir / "orch.md").write_text("{{agent:role}}\n")
+    agent_file = prompts_dir / "agents" / "role.md"
+    agent_file.write_text("ROLE_V1\n")
+    assert "ROLE_V1" in load("orch", str(tmp_path))
+
+    agent_file.write_text("ROLE_V2\n")
+    os.utime(agent_file, (agent_file.stat().st_atime, agent_file.stat().st_mtime + 10))
+    assert "ROLE_V2" in load("orch", str(tmp_path))

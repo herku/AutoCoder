@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import re
-from functools import lru_cache
 from pathlib import Path
 
 _DIR = Path(__file__).parent
 _AGENT_MARKER_RE = re.compile(r"\{\{agent:([^}]+)\}\}")
 
+# File-content cache keyed by resolved path, validated by mtime. Caching the
+# raw reads (rather than the expanded result, as the old @lru_cache did)
+# keeps long-lived processes (--serve) honest: adding or editing a repo
+# override — or an {{agent:X}} file it expands — takes effect on the next
+# load, no restart needed. Expansion itself is cheap regex work.
+_read_cache: dict[Path, tuple[float, str]] = {}
 
-@lru_cache(maxsize=None)
+
 def load(name: str, repo_path: str | None = None) -> str:
     """Load a prompt template by name (without .md extension).
 
@@ -27,9 +32,27 @@ def load(name: str, repo_path: str | None = None) -> str:
     return _AGENT_MARKER_RE.sub(expand, content)
 
 
+def _cache_clear() -> None:
+    _read_cache.clear()
+
+
+# Backward-compatible with the previous @lru_cache implementation.
+load.cache_clear = _cache_clear  # type: ignore[attr-defined]
+
+
 def _read(name: str, repo_path: str | None) -> str:
     if repo_path is not None:
         override = Path(repo_path) / ".autocoder" / "prompts" / f"{name}.md"
         if override.exists():
-            return override.read_text().rstrip("\n")
-    return (_DIR / f"{name}.md").read_text().rstrip("\n")
+            return _read_file(override)
+    return _read_file(_DIR / f"{name}.md")
+
+
+def _read_file(path: Path) -> str:
+    mtime = path.stat().st_mtime
+    cached = _read_cache.get(path)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    text = path.read_text().rstrip("\n")
+    _read_cache[path] = (mtime, text)
+    return text
